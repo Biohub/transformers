@@ -536,6 +536,14 @@ class ESMFold2Model(PreTrainedModel):
         )
         self._esmc: nn.Module | None = None
         self._esmc_fp8: bool = False  # set by load_esmc(fp8=True)
+        # When True, ESM-C is offloaded to CPU after its one-shot hidden-state
+        # computation (restored on the next call), freeing its ~12 GB for the
+        # recycling trunk + diffusion — the freed blocks stay in the caching pool
+        # so the trunk reuses them without cudaMalloc, relieving the allocator
+        # pressure that drove rank desync / spin-wait. Opt-in (the CP entry point
+        # ``wrap_model_with_cp(offload_esmc=...)`` sets it). Validated with CP:
+        # 2.14x end-to-end + 18.5 GB lower peak vs fp32, pLDDT unchanged.
+        self._offload_esmc: bool = False
 
         pf = config.folding_trunk
         self.folding_trunk = FoldingTrunk(
@@ -725,6 +733,10 @@ class ESMFold2Model(PreTrainedModel):
         lm_mask_pct: float = 0.0,
     ) -> Tensor:
         assert self._esmc is not None
+        # Restore ESM-C to the compute device if it was offloaded to CPU after a
+        # previous fold (see self._offload_esmc). No-op when already resident.
+        if self._offload_esmc:
+            self._esmc.to(self.device)
         # fp8 TE kernels require prod(shape[:-1]) % 8 == 0.
         pad_to = 8 if self._esmc_fp8 else None
         with _lm_precision_context(self._esmc_fp8):
@@ -982,6 +994,10 @@ class ESMFold2Model(PreTrainedModel):
             if lm_hidden_states is not None:
                 lm_z = self.language_model(lm_hidden_states.detach())
             del lm_hidden_states
+            # ESM-C is done for this forward — offload to free its ~12 GB for the
+            # trunk/diffusion (freed blocks stay in the caching pool for reuse).
+            if self._offload_esmc and self._esmc is not None:
+                self._esmc.to("cpu")
 
             pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
 

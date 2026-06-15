@@ -37,28 +37,28 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from projects.huggingface.transformers.models.esmfold2.distributed.comm import (
+from transformers.models.esmfold2.distributed.comm import (
     Ring2DComm,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.manager import (
+from transformers.models.esmfold2.distributed.manager import (
     DistributedManager,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.layernorm import (
+from transformers.models.esmfold2.distributed.model.layers.layernorm import (
     LayerNormParamsReplicated,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.linear import (
+from transformers.models.esmfold2.distributed.model.layers.linear import (
     LinearParamsReplicated,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.triangular_mult import (
+from transformers.models.esmfold2.distributed.model.layers.triangular_mult import (
     TriangleMultiplicativeBlockDistributed,
 )
-from projects.huggingface.transformers.models.esmfold2.modeling_esmfold2_common import (
+from transformers.models.esmfold2.modeling_esmfold2_common import (
     FoldingTrunk as SerialFoldingTrunk,
 )
-from projects.huggingface.transformers.models.esmfold2.modeling_esmfold2_common import (
+from transformers.models.esmfold2.modeling_esmfold2_common import (
     PairUpdateBlock as SerialPairUpdateBlock,
 )
-from projects.huggingface.transformers.models.esmfold2.modeling_esmfold2_common import (
+from transformers.models.esmfold2.modeling_esmfold2_common import (
     Transition as SerialTransition,
 )
 

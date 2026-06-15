@@ -21,14 +21,13 @@
 
 
 import os
-from copy import deepcopy
 from math import prod
 from typing import Any, Dict, Optional, OrderedDict, Union
 from warnings import warn
 
 import torch
 
-from projects.huggingface.transformers.models.esmfold2.distributed.utils import (
+from transformers.models.esmfold2.distributed.utils import (
     LayoutMap,
     LayoutRightMap,
 )
@@ -220,6 +219,11 @@ class DistributedManager:
         manager._backend = backend  # type: ignore[assignment]
 
         if manager.device.type == "cuda" and backend == "nccl":
+            # Disable NVLS (NVLink SHARP multicast) by default — it requires
+            # NVSwitch hardware + Fabric Manager, and probing for it via
+            # cuMulticastCreate raises a hard CUDA error (401) when unavailable.
+            # Users on NVSwitch systems can opt in by setting NCCL_NVLS_ENABLE=1.
+            os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
             try:
                 torch.distributed.init_process_group(
                     manager.backend,
@@ -228,7 +232,11 @@ class DistributedManager:
                     device_id=manager.device,
                     **kwargs_init_pg,
                 )
-            except TypeError:
+            except (TypeError, RuntimeError):
+                # TypeError: older PyTorch doesn't accept device_id.
+                # RuntimeError: device_id triggers eager NCCL connect which
+                # can fail (e.g. NVLS/NVSwitch not available, CUDA error 401).
+                # Fall back to lazy (non-eager) init in both cases.
                 torch.distributed.init_process_group(
                     manager.backend,
                     rank=manager.rank,
@@ -383,9 +391,11 @@ class DistributedManager:
                 name_subgroups, shape_subgroups, suffix_mesh="subgroups"
             )
             layout = DistributedManager._state["_layout_device_mesh_subgroups"]
-            coords = DistributedManager._state[
+            # get_coordinate() returned a list in older PyTorch and a tuple in
+            # newer versions; normalise to list so axis assignment works.
+            coords = list(DistributedManager._state[
                 "_device_mesh_subgroups"
-            ].get_coordinate()
+            ].get_coordinate())
             for name_group, subgroup_names in group2subgroup.items():
                 DistributedManager._state["_subgroups"][name_group] = [
                     DistributedManager._state["_group"][n] for n in subgroup_names
@@ -397,7 +407,7 @@ class DistributedManager:
                     DistributedManager._state["_group_rank"][n] for n in subgroup_names
                 ]
                 axes_subgroup = group2subgroup_axes[name_group]
-                slices = deepcopy(coords)
+                slices = coords.copy()
                 for axis in axes_subgroup:
                     slices[axis] = slice(None)
                 layout_subgroup = layout[tuple(slices)]
@@ -562,15 +572,18 @@ class DistributedManager:
     def cleanup():
         if DistributedManager._state.get("_group", {}) != {}:
             if torch.distributed.is_initialized():
-                if (
-                    DistributedManager._state["_device"].type == "cuda"
-                    and torch.cuda.is_available()
-                ):
-                    torch.distributed.barrier(
-                        device_ids=[DistributedManager._state["_local_rank"]]
-                    )
-                else:
-                    torch.distributed.barrier()
+                try:
+                    if (
+                        DistributedManager._state["_device"].type == "cuda"
+                        and torch.cuda.is_available()
+                    ):
+                        torch.distributed.barrier(
+                            device_ids=[DistributedManager._state["_local_rank"]]
+                        )
+                    else:
+                        torch.distributed.barrier()
+                except Exception:
+                    pass
                 torch.distributed.destroy_process_group()
             else:
                 DistributedManager._state = {}

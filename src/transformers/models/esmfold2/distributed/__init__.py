@@ -21,13 +21,21 @@
 
 """2D context-parallel distributed extensions for ESMFold2."""
 
-from projects.huggingface.transformers.models.esmfold2.distributed.manager import (
+from transformers.models.esmfold2.distributed.manager import (
     DistributedManager,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.pairformer import (
+from transformers.models.esmfold2.distributed.model.layers.msa_encoder import (
+    MSAEncoderDistributed,
+)
+from transformers.models.esmfold2.distributed.model.layers.pairformer import (
     FoldingTrunkDistributed,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.utils import (
+from transformers.models.esmfold2.distributed.msa_wrapper import (
+    MSAEncoderCPWrapper,
+    wrap_model_with_cp,
+    wrap_model_with_cp_msa_encoder,
+)
+from transformers.models.esmfold2.distributed.utils import (
     TrunkCPWrapper,
     wrap_model_with_cp_trunks,
 )
@@ -35,6 +43,10 @@ from projects.huggingface.transformers.models.esmfold2.distributed.utils import 
 __all__ = [
     "DistributedManager",
     "FoldingTrunkDistributed",
+    "MSAEncoderCPWrapper",
+    "MSAEncoderDistributed",
     "TrunkCPWrapper",
+    "wrap_model_with_cp",
+    "wrap_model_with_cp_msa_encoder",
     "wrap_model_with_cp_trunks",
 ]

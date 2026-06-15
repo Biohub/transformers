@@ -35,29 +35,41 @@ The distributed BMM uses ring communication to accumulate partial results:
   - Each step computes a local matmul; results are accumulated
 """
 
+import os
 from enum import Enum, auto
 from typing import Tuple
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 
-from projects.huggingface.transformers.models.esmfold2.distributed.comm import (
+from transformers.models.esmfold2.distributed.comm import (
     Ring2DComm,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.layernorm import (
+from transformers.models.esmfold2.distributed.model.layers.layernorm import (
     LayerNormParamsReplicated,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.model.layers.linear import (
+from transformers.models.esmfold2.distributed.model.layers.linear import (
     LinearParamsReplicated,
 )
-from projects.huggingface.transformers.models.esmfold2.distributed.utils import (
+from transformers.models.esmfold2.distributed.utils import (
     update_exhaustive_strides,
 )
-from projects.huggingface.transformers.models.esmfold2.modeling_esmfold2_common import (
+from transformers.models.esmfold2.modeling_esmfold2_common import (
     TriangleMultiplicativeBlock as SerialTriangleMultiplicativeBlock,
 )
+
+
+# Optional cross-rank re-alignment before the ring comm (cuda.synchronize +
+# barrier on the CP group at each tri-mul). Motivated by the hypothesis that the
+# CP trunk's time is NCCL P2P spin-wait from rank desync. A controlled A/B
+# (CP_RANK_SYNC 0 vs 1, 5 loops) showed only a ~9% mean change, WITHIN the
+# run-to-run noise (trunk ~45–66 s/call) — i.e. desync is NOT the dominant cost.
+# Kept as an opt-in experiment knob, DEFAULT OFF. Correctness-neutral (touches no
+# tensors). Enable with CP_RANK_SYNC=1.
+_CP_RANK_SYNC = os.environ.get("CP_RANK_SYNC", "0") == "1"
 
 
 class _Direction(Enum):
@@ -142,7 +154,11 @@ def _distributed_bmm(
     i_ready ^= 1
     i_recv ^= 1
 
-    out = torch.zeros_like(lhs_buffer[i_ready])
+    # Accumulator initialised from the first matmul rather than a pre-allocated
+    # zeros buffer: avoids one large per-call allocation (~370 MB bf16) and is
+    # more correct — the matmul output is (B,D,n,m), whereas zeros_like(lhs) is
+    # (B,D,n,k) and only matched when the local shard was square (n==m==k).
+    out: torch.Tensor | None = None
 
     comm.comm_row_init.wait_until_finished()
     comm.comm_col_init.wait_until_finished()
@@ -157,7 +173,8 @@ def _distributed_bmm(
             rhs_buffer[i_recv] = comm.comm_col.enqueue_to_dispatch(
                 rhs_ready, rhs_buffer[i_recv]
             )
-        out = out + torch.matmul(lhs_ready, rhs_ready)
+        prod = torch.matmul(lhs_ready, rhs_ready)
+        out = prod if out is None else out + prod
         if k_step < comm.group_layout.shape[1] - 1:
             comm.comm_row.wait_until_finished()
             comm.comm_col.wait_until_finished()
@@ -399,6 +416,15 @@ class TriangleMultiplicativeBlockDistributed(nn.Module):
         -------
         DTensor of same shape and placements as pair.
         """
+        # Re-align ranks before the ring comm to prevent NCCL P2P spin-wait
+        # (see _CP_RANK_SYNC above). The cuda.synchronize() throttles the CPU so
+        # it can't race ahead enqueuing unbounded async P2P + large allocations
+        # (the dominant cause of the pile-up); the barrier then aligns ranks
+        # cross-process. Correctness-neutral (no tensors touched).
+        if _CP_RANK_SYNC and dist.is_initialized():
+            torch.cuda.synchronize()
+            dist.barrier(group=self.ring_comm.group_2d)
+
         # 1. Layer-normalise input
         normalized = self.norm_start(pair)
 
