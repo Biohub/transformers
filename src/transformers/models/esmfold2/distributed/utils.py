@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 
 class LayoutMap:
@@ -445,6 +445,24 @@ class TrunkCPWrapper(nn.Module):
     def set_chunk_size(self, _chunk_size: int | None) -> None:
         return
 
+    def forward_sharded(
+        self, pair_dt: DTensor, pair_attention_mask: DTensor | None = None
+    ) -> DTensor:
+        """Run the distributed trunk on an already-sharded pair DTensor.
+
+        ``pair_dt`` (and the optional mask) must already be padded to a multiple
+        of ``self.shard_factor``, cast to the trunk dtype, and distributed with
+        placements ``[Shard(0), Shard(1), Shard(2)]`` on ``self.device_mesh``.
+        Returns a DTensor with the same placements — **no** ``full_tensor()``
+        gather.
+
+        This is the entry point a CP orchestrator uses to keep the pair sharded
+        across module boundaries (e.g. the recycle loop), instead of paying a
+        ``full_tensor()`` + ``distribute_tensor`` round-trip on every call. The
+        plain-tensor :meth:`forward` is a thin adapter around it.
+        """
+        return self.dist_trunk(pair_dt, pair_attention_mask=pair_attention_mask)
+
     def forward(
         self, pair: torch.Tensor, pair_attention_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -476,7 +494,7 @@ class TrunkCPWrapper(nn.Module):
                 [Shard(0), Shard(1), Shard(2)],
             )
 
-        out_dt = self.dist_trunk(pair_dt, pair_attention_mask=mask_dt)
+        out_dt = self.forward_sharded(pair_dt, pair_attention_mask=mask_dt)
         out = out_dt.full_tensor()
         if self._trunk_bf16:
             out = out.to(orig_dtype)
