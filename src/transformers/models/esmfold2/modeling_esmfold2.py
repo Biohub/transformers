@@ -1073,9 +1073,12 @@ class ESMFold2Model(PreTrainedModel):
                     lm_z = self.language_model(lm_hidden_states.detach())
             del lm_hidden_states
             # ESM-C is done for this forward — offload to free its ~12 GB for the
-            # trunk/diffusion (freed blocks stay in the caching pool for reuse).
+            # trunk/diffusion. Return the freed blocks to the driver (not just the
+            # caching pool) so cuSOLVER's out-of-pool cudaMalloc — for its handle in
+            # the diffusion rigid-align SVD — can succeed near the OOM boundary.
             if self._offload_esmc and self._esmc is not None:
                 self._esmc.to("cpu")
+                torch.cuda.empty_cache()
 
             pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
 
