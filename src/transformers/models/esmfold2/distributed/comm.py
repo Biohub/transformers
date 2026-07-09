@@ -26,7 +26,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
-from projects.huggingface.transformers.models.esmfold2.distributed.utils import (
+from transformers.models.esmfold2.distributed.utils import (
     LayoutMap,
     get_group_rank_from_axial_shift,
 )

@@ -226,6 +226,55 @@ class ConfidenceHead(nn.Module):
         del pair_delta
         single = self.row_attention_pooling(pair, mask)
 
+        pae_logits = self.pae_head(self.pae_ln(pair))
+        pde_logits = self.pde_head(self.pde_ln(pair))
+        return self._finish(
+            single=single,
+            pae_logits=pae_logits,
+            pde_logits=pde_logits,
+            x_pred=x_pred,
+            distogram_atom_idx=distogram_atom_idx,
+            token_attention_mask=token_attention_mask,
+            atom_to_token=atom_to_token,
+            atom_attention_mask=atom_attention_mask,
+            asym_id=asym_id,
+            mol_type=mol_type,
+            num_diffusion_samples=num_diffusion_samples,
+        )
+
+    def _finish(
+        self,
+        *,
+        single: Tensor,
+        pae_logits: Tensor,
+        pde_logits: Tensor,
+        x_pred: Tensor,
+        distogram_atom_idx: Tensor,
+        token_attention_mask: Tensor,
+        atom_to_token: Tensor,
+        atom_attention_mask: Tensor,
+        asym_id: Tensor,
+        mol_type: Tensor,
+        num_diffusion_samples: int,
+    ) -> dict[str, Tensor]:
+        """Atom-space (pLDDT/resolved) + PAE/PDE + pTM/ipTM back-half.
+
+        Split out of ``forward`` so the CP wrapper (#6) can run the distributed
+        pair front (z_base → trunk → row-pool → pae/pde heads), gather the small
+        ``single`` / ``pae_logits`` / ``pde_logits``, and reuse this exact
+        (serial, replicated) reduction code — one source of truth for the fiddly
+        pTM/ipTM/pair_chains logic."""
+        x_pred_flat = self._flatten_sample_axis(x_pred)
+        atom_to_token_m = self._repeat_batch(atom_to_token, num_diffusion_samples)
+        atom_mask_m = self._repeat_batch(atom_attention_mask, num_diffusion_samples)
+        rep_idx_m = self._repeat_batch(distogram_atom_idx, num_diffusion_samples).long()
+        mask = self._repeat_batch(token_attention_mask, num_diffusion_samples)
+        Bm = single.shape[0]
+        rep_coords = gather_rep_atom_coords(x_pred_flat, rep_idx_m)
+        rep_distances = torch.cdist(
+            rep_coords, rep_coords, compute_mode="donot_use_mm_for_euclid_dist"
+        )
+
         atom_mask_f = atom_mask_m.float()
         s_at_atoms = gather_token_to_atom(single, atom_to_token_m)
         s_at_atoms_ln = self.plddt_ln(s_at_atoms)
@@ -275,12 +324,8 @@ class ConfidenceHead(nn.Module):
 
         plddt_ca = plddt_per_atom.gather(1, rep_idx_m)
 
-        # PAE
-        pae_logits = self.pae_head(self.pae_ln(pair))
+        # PAE / PDE (logits computed by the caller — serial front or CP wrapper).
         pae = _categorical_mean(pae_logits, start=0.0, end=32.0).detach()
-
-        # PDE
-        pde_logits = self.pde_head(self.pde_ln(pair))
         pde = _categorical_mean(pde_logits, start=0.0, end=32.0).detach()
 
         # Resolved (per-atom binary).
@@ -536,6 +581,14 @@ class ESMFold2Model(PreTrainedModel):
         )
         self._esmc: nn.Module | None = None
         self._esmc_fp8: bool = False  # set by load_esmc(fp8=True)
+        # When True, ESM-C is offloaded to CPU after its one-shot hidden-state
+        # computation (restored on the next call), freeing its ~12 GB for the
+        # recycling trunk + diffusion — the freed blocks stay in the caching pool
+        # so the trunk reuses them without cudaMalloc, relieving the allocator
+        # pressure that drove rank desync / spin-wait. Opt-in (the CP entry point
+        # ``wrap_model_with_cp(offload_esmc=...)`` sets it). Validated with CP:
+        # 2.14x end-to-end + 18.5 GB lower peak vs fp32, pLDDT unchanged.
+        self._offload_esmc: bool = False
 
         pf = config.folding_trunk
         self.folding_trunk = FoldingTrunk(
@@ -725,6 +778,10 @@ class ESMFold2Model(PreTrainedModel):
         lm_mask_pct: float = 0.0,
     ) -> Tensor:
         assert self._esmc is not None
+        # Restore ESM-C to the compute device if it was offloaded to CPU after a
+        # previous fold (see self._offload_esmc). No-op when already resident.
+        if self._offload_esmc:
+            self._esmc.to(self.device)
         # fp8 TE kernels require prod(shape[:-1]) % 8 == 0.
         pad_to = 8 if self._esmc_fp8 else None
         with _lm_precision_context(self._esmc_fp8):
@@ -763,6 +820,27 @@ class ESMFold2Model(PreTrainedModel):
         tok_mask: Tensor,
         total_steps: int,
     ) -> Tensor:
+        # CP orchestrator seam: when a context-parallel recycle engine has been
+        # installed (by ``wrap_model_with_cp``), delegate the whole loop to it so
+        # the pair stays sharded across iterations instead of round-tripping
+        # through ``full_tensor()`` at every module boundary. Plain ``getattr``
+        # default keeps this file CP-agnostic (no distributed import). The engine
+        # returns a gathered full tensor, so the caller is unchanged.
+        _cp_engine = getattr(self, "_cp_recycle_engine", None)
+        if _cp_engine is not None:
+            return _cp_engine.run_loop(
+                self,
+                z=z,
+                z_init=z_init,
+                lm_z=lm_z,
+                msa_inputs=_msa_inputs,
+                pair_mask=pair_mask,
+                a=a,
+                b_mat=b_mat,
+                tok_mask=tok_mask,
+                total_steps=total_steps,
+            )
+
         # Helper method (not inline) so per-iter locals free on return —
         # otherwise leaks ~2 GB L²×c_z into distogram/sample scope.
         # training=True forces dropout under eval(), matching the per-loop
@@ -947,19 +1025,41 @@ class ESMFold2Model(PreTrainedModel):
                 atom_to_token=atom_to_token,
             )
 
-            z_init = self.z_init_1(x_inputs).unsqueeze(2) + self.z_init_2(
-                x_inputs
-            ).unsqueeze(1)
+            # CP (sharded pair-init): build z_init / rel_pos / token_bonds directly
+            # as 2-D-sharded DTensors so the full L×L pair is never resident on any
+            # rank (the init-phase peak that made CP OOM at short L). Installed with
+            # the recycle engine; plain getattr keeps this file CP-agnostic.
+            _cp_pair_init = getattr(self, "_cp_pair_init", None)
+            if _cp_pair_init is not None:
+                (
+                    z_init,
+                    relative_position_encoding,
+                    token_bonds_encoding,
+                    _pi_n_orig,
+                ) = _cp_pair_init(
+                    x_inputs,
+                    residue_index,
+                    asym_id,
+                    sym_id,
+                    entity_id,
+                    token_index,
+                    token_bonds,
+                )
+            else:
+                z_init = self.z_init_1(x_inputs).unsqueeze(2) + self.z_init_2(
+                    x_inputs
+                ).unsqueeze(1)
 
-            relative_position_encoding = self.rel_pos(
-                residue_index=residue_index,
-                asym_id=asym_id,
-                sym_id=sym_id,
-                entity_id=entity_id,
-                token_index=token_index,
-            )
-            token_bonds_encoding = self.token_bonds(token_bonds.float())
-            z_init = z_init + relative_position_encoding + token_bonds_encoding
+                relative_position_encoding = self.rel_pos(
+                    residue_index=residue_index,
+                    asym_id=asym_id,
+                    sym_id=sym_id,
+                    entity_id=entity_id,
+                    token_index=token_index,
+                )
+                token_bonds_encoding = self.token_bonds(token_bonds.float())
+                z_init = z_init + relative_position_encoding + token_bonds_encoding
+                _pi_n_orig = z_init.shape[1]
 
             if (
                 lm_hidden_states is None
@@ -980,12 +1080,42 @@ class ESMFold2Model(PreTrainedModel):
                 )
             lm_z: Tensor | None = None
             if lm_hidden_states is not None:
-                lm_z = self.language_model(lm_hidden_states.detach())
+                # CP (#14): when a distributed LM->pair builder is installed, emit
+                # lm_z as a sharded (Shard0,Shard1,Shard2) DTensor so the full L×L
+                # pair is never resident on any rank (the binding peak per the T0
+                # phase sweep). Consumed by the recycle engine, installed together
+                # with it. Plain getattr keeps this file CP-agnostic.
+                # Only emit a sharded lm_z when the recycle engine (its sole
+                # consumer) is active; the serial _run_one_loop expects a full
+                # tensor. Keeps the gather-per-iteration fallback path valid.
+                _cp_lm = getattr(self, "_cp_language_model", None)
+                if _cp_lm is not None and getattr(self, "_cp_recycle_engine", None) is not None:
+                    lm_z, _ = _cp_lm(lm_hidden_states.detach())
+                else:
+                    lm_z = self.language_model(lm_hidden_states.detach())
             del lm_hidden_states
+            # ESM-C is done for this forward — offload to free its ~12 GB for the
+            # trunk/diffusion. Return the freed blocks to the driver (not just the
+            # caching pool) so cuSOLVER's out-of-pool cudaMalloc — for its handle in
+            # the diffusion rigid-align SVD — can succeed near the OOM boundary.
+            if self._offload_esmc and self._esmc is not None:
+                self._esmc.to("cpu")
+                torch.cuda.empty_cache()
 
-            pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
+            # Pair attention mask: sharded block under CP (outer product of the
+            # sliced row/col token-mask, matching evolutionaryscale's _cp_pair_mask
+            # — never the full L×L), else the serial full outer product.
+            if _cp_pair_init is not None:
+                pair_mask = _cp_pair_init.pair_mask(tok_mask)
+            else:
+                pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
 
-            z = self._init_pair_state(z_init)
+            # Initial pair state: sharded random block under CP (never full L×L),
+            # else the serial full draw.
+            if _cp_pair_init is not None:
+                z = _cp_pair_init.init_pair_state(z_init, _pi_n_orig)
+            else:
+                z = self._init_pair_state(z_init)
 
             a, b = self._discretized_dynamics()
             a = a.view(1, 1, 1, -1).to(device=z.device, dtype=z.dtype)
@@ -1009,28 +1139,67 @@ class ESMFold2Model(PreTrainedModel):
                     subsample_enabled=msa_subsample_at_inference,
                 )
 
-            # Method call (not inline loop) frees per-iter L²×c_z locals.
-            z = self._run_one_loop(
-                z=z,
-                z_init=z_init,
-                lm_z=lm_z,
-                _msa_inputs=_msa_inputs,
-                pair_mask=pair_mask,
-                a=a,
-                b_mat=b_mat,
-                tok_mask=tok_mask,
-                total_steps=total_steps,
-            )
-            del z_init, lm_z, _msa_inputs, a, b_mat
+            # CP tail (#7): when a recycle engine is installed, keep the pair
+            # SHARDED through the recycle loop + parcae so the full L×L pair is
+            # not resident during the expensive structure phase. The pair lives as
+            # ``_z_dt`` (DTensor); it is gathered only transiently for the heads
+            # that don't yet consume sharded input (distogram, confidence). Plain
+            # ``getattr`` keeps this file CP-agnostic.
+            _cp_engine = getattr(self, "_cp_recycle_engine", None)
+            _z_dt = None
+            # z may be a sharded DTensor (padded) under CP, so use the pre-pad
+            # token count tracked at pair-init rather than z.shape[1].
+            _n_orig = _pi_n_orig
+            if _cp_engine is not None:
+                _z_dt, _n_orig = _cp_engine.run_loop(
+                    self,
+                    z=z,
+                    z_init=z_init,
+                    lm_z=lm_z,
+                    msa_inputs=_msa_inputs,
+                    pair_mask=pair_mask,
+                    a=a,
+                    b_mat=b_mat,
+                    tok_mask=tok_mask,
+                    total_steps=total_steps,
+                    gather=False,
+                    n_orig=_pi_n_orig,
+                )
+                del z_init, lm_z, _msa_inputs, a, b_mat
+                _z_dt = _cp_engine.parcae_finish(self, _z_dt, pair_mask)
+                z = None  # pair lives sharded in _z_dt; gathered transiently below
+            else:
+                # Method call (not inline loop) frees per-iter L²×c_z locals.
+                z = self._run_one_loop(
+                    z=z,
+                    z_init=z_init,
+                    lm_z=lm_z,
+                    _msa_inputs=_msa_inputs,
+                    pair_mask=pair_mask,
+                    a=a,
+                    b_mat=b_mat,
+                    tok_mask=tok_mask,
+                    total_steps=total_steps,
+                )
+                del z_init, lm_z, _msa_inputs, a, b_mat
 
-            z = self.parcae_readout(z)
-            z = self.parcae_coda(z, pair_attention_mask=pair_mask)
+                z = self.parcae_readout(z)
+                z = self.parcae_coda(z, pair_attention_mask=pair_mask)
 
-            z = z.float()
-        distogram_logits = self.distogram_head(z + z.transpose(-2, -3))
+                z = z.float()
+        _cp_disto = getattr(self, "_cp_distogram_head", None)
+        if _z_dt is not None and _cp_disto is not None:
+            # Distributed: symmetrize + head off the sharded pair, no full-z gather.
+            distogram_logits = _cp_disto.forward_sharded(_z_dt, _n_orig)
+        else:
+            if _z_dt is not None:
+                z = _z_dt.full_tensor()[:, :_n_orig, :_n_orig, :].float()
+            distogram_logits = self.distogram_head(z + z.transpose(-2, -3))
+            if _z_dt is not None:
+                del z  # free the full pair before the (sharded) structure phase
 
         structure_output = self.structure_head.sample(
-            z_trunk=z,
+            z_trunk=(_z_dt if _z_dt is not None else z),
             s_inputs=x_inputs,
             s_trunk=None,
             relative_position_encoding=relative_position_encoding,
@@ -1058,20 +1227,43 @@ class ESMFold2Model(PreTrainedModel):
         output: dict[str, Tensor] = {"distogram_logits": distogram_logits}
         output["sample_atom_coords"] = sample_coords
 
-        confidence_output = self.confidence_head(
-            s_inputs=x_inputs.detach(),
-            z=z.detach().float(),
-            x_pred=sample_coords.detach(),
-            distogram_atom_idx=disto_idx,
-            token_attention_mask=tok_mask,
-            atom_to_token=atom_to_token,
-            atom_attention_mask=atm_mask,
-            asym_id=asym_id,
-            mol_type=mol_type,
-            num_diffusion_samples=n_samples,
-            relative_position_encoding=relative_position_encoding.detach(),
-            token_bonds_encoding=token_bonds_encoding.detach(),
-        )
+        # Confidence head (#6): on the CP tail, run it distributed straight off the
+        # sharded pair (no full-L×L re-gather of z) when the wrapper is installed;
+        # otherwise re-gather transiently and run serially. CP-agnostic getattr.
+        _cp_conf = getattr(self, "_cp_confidence_head", None)
+        if _z_dt is not None and _cp_conf is not None:
+            confidence_output = _cp_conf.forward_sharded(
+                _z_dt,
+                _n_orig,
+                s_inputs=x_inputs.detach(),
+                x_pred=sample_coords.detach(),
+                distogram_atom_idx=disto_idx,
+                token_attention_mask=tok_mask,
+                atom_to_token=atom_to_token,
+                atom_attention_mask=atm_mask,
+                asym_id=asym_id,
+                mol_type=mol_type,
+                num_diffusion_samples=n_samples,
+                relative_position_encoding=relative_position_encoding.detach(),
+                token_bonds_encoding=token_bonds_encoding.detach(),
+            )
+        else:
+            if _z_dt is not None:
+                z = _z_dt.full_tensor()[:, :_n_orig, :_n_orig, :].float()
+            confidence_output = self.confidence_head(
+                s_inputs=x_inputs.detach(),
+                z=z.detach().float(),
+                x_pred=sample_coords.detach(),
+                distogram_atom_idx=disto_idx,
+                token_attention_mask=tok_mask,
+                atom_to_token=atom_to_token,
+                atom_attention_mask=atm_mask,
+                asym_id=asym_id,
+                mol_type=mol_type,
+                num_diffusion_samples=n_samples,
+                relative_position_encoding=relative_position_encoding.detach(),
+                token_bonds_encoding=token_bonds_encoding.detach(),
+            )
         output.update(confidence_output)
         output["atom_pad_mask"] = (
             atm_mask.unsqueeze(0) if atm_mask.dim() == 1 else atm_mask

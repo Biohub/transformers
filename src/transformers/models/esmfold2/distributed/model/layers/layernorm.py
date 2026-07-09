@@ -194,12 +194,41 @@ class LayerNormParamsReplicated(nn.Module):
         else:
             self._reduce_group = dist.group.WORLD
 
+        # Local-tensor cache for the inference fast path (see LinearParamsReplicated).
+        self._w_local: Optional[torch.Tensor] = None
+        self._b_local: Optional[torch.Tensor] = None
+
+    def _inference_locals(self):
+        w = self.weight
+        cur_dtype = None if w is None else w.dtype
+        if (w is not None and self._w_local is None) or (
+            self._w_local is not None and self._w_local.dtype != cur_dtype
+        ):
+            self._w_local = w.to_local()
+            self._b_local = self.bias.to_local() if self.bias is not None else None
+        return self._w_local, self._b_local
+
     def forward(self, x: DTensor) -> DTensor:
-        return _LayerNormParamsReplicatedImpl.apply(  # type: ignore[return-value]
-            x,
-            self.normalized_shape,
-            self.weight,
-            self.bias,
-            self.eps,
-            self._reduce_group,
+        if torch.is_grad_enabled():
+            return _LayerNormParamsReplicatedImpl.apply(  # type: ignore[return-value]
+                x,
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+                self._reduce_group,
+            )
+        # Inference fast path: skip the autograd.Function machinery + ctx stores,
+        # reuse cached replicated param locals. Bit-identical to the Function's
+        # forward (same to_local → F.layer_norm → from_local).
+        w_local, b_local = self._inference_locals()
+        out_local = F.layer_norm(
+            x.to_local(), self.normalized_shape, w_local, b_local, self.eps
+        )
+        return DTensor.from_local(  # type: ignore[return-value]
+            out_local,
+            device_mesh=x.device_mesh,
+            placements=x.placements,
+            shape=x.shape,
+            stride=x.stride(),
         )

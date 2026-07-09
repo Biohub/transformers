@@ -31,7 +31,7 @@ from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 
-from projects.huggingface.transformers.models.esmfold2.distributed.utils import (
+from transformers.models.esmfold2.distributed.utils import (
     update_exhaustive_strides,
 )
 
@@ -193,7 +193,36 @@ class LinearParamsReplicated(nn.Module):
         else:
             self._reduce_group = dist.group.WORLD
 
+        # Cache of the replicated params' local tensors for the inference fast
+        # path (populated lazily on first inference forward, after any post-
+        # construction dtype cast such as TrunkCPWrapper's .to(bf16)).
+        self._w_local: Optional[Tensor] = None
+        self._b_local: Optional[Tensor] = None
+
+    def _inference_locals(self) -> tuple[Tensor, Optional[Tensor]]:
+        # Refresh if dtype changes (covers a later .to(bf16)); weights are static
+        # within an inference run so this caches after the first call.
+        if self._w_local is None or self._w_local.dtype != self.weight.dtype:
+            self._w_local = self.weight.to_local()
+            self._b_local = self.bias.to_local() if self.bias is not None else None
+        return self._w_local, self._b_local
+
     def forward(self, x: DTensor) -> DTensor:
-        return _LinearParamsReplicatedImpl.apply(  # type: ignore[return-value]
-            x, self.weight, self.bias, self._reduce_group, self.avg_reduce
+        if torch.is_grad_enabled():
+            return _LinearParamsReplicatedImpl.apply(  # type: ignore[return-value]
+                x, self.weight, self.bias, self._reduce_group, self.avg_reduce
+            )
+        # Inference fast path: skip the autograd.Function.apply machinery + ctx
+        # bookkeeping and reuse cached replicated weight locals. Bit-identical to
+        # the Function's forward (same to_local → F.linear → from_local).
+        w_local, b_local = self._inference_locals()
+        out_local = F.linear(x.to_local(), w_local, b_local)
+        shape_output = x.shape[:-1] + (self.weight.shape[0],)
+        stride_output = update_exhaustive_strides(x.shape, x.stride(), shape_output)
+        return DTensor.from_local(  # type: ignore[return-value]
+            out_local,
+            device_mesh=x.device_mesh,
+            placements=x.placements,
+            shape=shape_output,
+            stride=stride_output,
         )
