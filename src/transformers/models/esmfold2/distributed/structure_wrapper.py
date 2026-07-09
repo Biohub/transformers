@@ -144,19 +144,25 @@ class DiffusionModuleCPWrapper(nn.Module):
         # Step 1: conditioning -> full s, sharded (padded) z. Only materialise +
         # distribute the full z_trunk on the cache miss (first step); afterwards
         # the sharded z is reused from the cache.
+        # relative_position_encoding may arrive already padded + sharded (from
+        # PairInitDistributed) — use it directly instead of re-materialising the
+        # full L×L tensor to distribute it.
+        def _rp_to_dt():
+            if isinstance(relative_position_encoding, DTensor):
+                return relative_position_encoding
+            return distribute_tensor(
+                _pad_pair(relative_position_encoding).contiguous(), mesh, _PAIR_PL
+            )
+
         z_cached = inference_cache is not None and "z_cp" in inference_cache
         if z_cached:
             zt_dt = rp_dt = None
         elif zt_is_dtensor:
             zt_dt = z_trunk  # already padded + sharded; do not re-distribute
-            rp_dt = distribute_tensor(
-                _pad_pair(relative_position_encoding).contiguous(), mesh, _PAIR_PL
-            )
+            rp_dt = _rp_to_dt()
         else:
             zt_dt = distribute_tensor(_pad_pair(z_trunk).contiguous(), mesh, _PAIR_PL)
-            rp_dt = distribute_tensor(
-                _pad_pair(relative_position_encoding).contiguous(), mesh, _PAIR_PL
-            )
+            rp_dt = _rp_to_dt()
         s, z_dt = self.cond(
             t_hat=t,
             s_inputs=s_inputs,

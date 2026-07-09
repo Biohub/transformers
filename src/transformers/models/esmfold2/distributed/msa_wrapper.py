@@ -146,11 +146,6 @@ class MSAEncoderCPWrapper(nn.Module):
             m = F.pad(m, (0, 0, 0, 0, 0, pad))  # pad L (dim 1)
             msa_attention_mask = F.pad(msa_attention_mask, (0, 0, 0, pad))  # pad L
 
-        # Build the pair attention mask from the (padded) token mask; padded
-        # rows/cols are zero so they contribute nothing.
-        tok_mask = msa_attention_mask[:, :, 0].bool()
-        pair_mask = (tok_mask.unsqueeze(2) & tok_mask.unsqueeze(1)).to(m.dtype)
-
         # Cast the heavy inputs to bf16 so the (bf16) dist_encoder runs bf16 end to
         # end; restore the caller's dtype on the output.
         orig_dtype = x_pair_dt.dtype
@@ -158,7 +153,6 @@ class MSAEncoderCPWrapper(nn.Module):
             m = m.to(torch.bfloat16)
             x_pair_dt = x_pair_dt.to(torch.bfloat16)
             msa_attention_mask = msa_attention_mask.to(torch.bfloat16)
-            pair_mask = pair_mask.to(torch.bfloat16)
 
         mesh = self.device_mesh
         m_dt = distribute_tensor(
@@ -169,9 +163,16 @@ class MSAEncoderCPWrapper(nn.Module):
             mesh,
             [Shard(0), Shard(1), Replicate()],
         )
-        pair_mask_dt = distribute_tensor(
-            pair_mask.contiguous(), mesh, [Shard(0), Shard(1), Shard(2)]
+        # Pair attention mask built SHARDED from the (padded) token mask — the
+        # per-block outer product, never a full [B, L, L] (matches evolutionaryscale
+        # _cp_pair_mask). Padded rows/cols are zero, so they contribute nothing.
+        from transformers.models.esmfold2.distributed.model.layers.pair_init import (
+            build_sharded_pair_mask,
         )
+
+        pair_mask_dt = build_sharded_pair_mask(
+            msa_attention_mask[:, :, 0], mesh
+        ).to(m.dtype)
 
         out_dt = self.dist_encoder(m_dt, x_pair_dt, msa_mask_dt, pair_mask_dt)
         if self._bf16:
@@ -304,6 +305,16 @@ def wrap_model_with_cp(
         )
 
         model._cp_recycle_engine = CPRecycleEngine(model, dist_manager)
+
+        # Sharded pair-init builder: constructs z_init / rel_pos / token_bonds as
+        # 2-D-sharded DTensors so the full L×L pair is never resident on a rank
+        # during the init phase (the dominant per-rank peak that made CP OOM at
+        # short L). The model's forward delegates via the _cp_pair_init seam.
+        from transformers.models.esmfold2.distributed.model.layers.pair_init import (
+            PairInitDistributed,
+        )
+
+        model._cp_pair_init = PairInitDistributed(model, dist_manager)
 
         # Install the distributed LM->pair builder (#14) so lm_z is produced as a
         # sharded DTensor instead of a full L×L tensor on every rank (the binding

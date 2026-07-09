@@ -44,10 +44,14 @@ from math import lcm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor import DTensor
 
 from transformers.models.esmfold2.distributed.model.layers.confidence_zbase import (
     ConfidenceZBaseDistributed,
+)
+from transformers.models.esmfold2.distributed.model.layers.pair_init import (
+    build_sharded_distogram_bins,
+    build_sharded_pair_mask,
 )
 from transformers.models.esmfold2.distributed.model.layers.layernorm import (
     LayerNormParamsReplicated,
@@ -61,8 +65,6 @@ from transformers.models.esmfold2.distributed.model.layers.row_attention_pooling
 from transformers.models.esmfold2.modeling_esmfold2_common import (
     gather_rep_atom_coords,
 )
-
-_PAIR = [Shard(0), Shard(1), Shard(2)]
 
 
 class ConfidenceHeadCPWrapper(nn.Module):
@@ -115,22 +117,22 @@ class ConfidenceHeadCPWrapper(nn.Module):
         pad = Lpad - n_orig
         pair_dtype = torch.float32
 
-        # --- distogram bins (full, replicated; small single-channel L²) ---------
+        # --- distogram bins: sharded block cdist (never the full [B, N, N]) -----
         rep_idx = distogram_atom_idx.long()
-        rep_coords = gather_rep_atom_coords(x_pred, rep_idx)  # (B, n, 3)
-        rep_distances = torch.cdist(
-            rep_coords, rep_coords, compute_mode="donot_use_mm_for_euclid_dist"
-        )
-        distogram_bins = (
-            (rep_distances.unsqueeze(-1) > self.head.boundaries).sum(dim=-1).long()
-        )
+        rep_coords = gather_rep_atom_coords(x_pred, rep_idx)  # (B, n, 3) — replicated, cheap
+        bins_p = build_sharded_distogram_bins(
+            rep_coords, self.head.boundaries, mesh
+        )  # (S0, S1, S2) [B, Lpad, Lpad]
 
         # --- pad aux tensors to the shard factor (z_dt is already padded) -------
         def _pad_pair(t):
+            # An already-sharded DTensor is padded (built at the shard factor) —
+            # pass it through; only a full tensor needs padding here.
+            if isinstance(t, DTensor):
+                return t
             return F.pad(t, (0, 0, 0, pad, 0, pad)) if pad else t
 
         s_in_p = F.pad(s_inputs, (0, 0, 0, pad)) if pad else s_inputs
-        bins_p = F.pad(distogram_bins, (0, pad, 0, pad)) if pad else distogram_bins
         relpos_p = (
             _pad_pair(relative_position_encoding)
             if relative_position_encoding is not None
@@ -151,11 +153,10 @@ class ConfidenceHeadCPWrapper(nn.Module):
         )  # (S0, S1, S2) fp32, [B, Lpad, Lpad, d_pair]
 
         # --- nested FoldingTrunk (add-back, like serial pair.add_(trunk(pair))) -
-        pair_mask = (mask_p[:, :, None] * mask_p[:, None, :]).contiguous()  # (B,Lpad,Lpad)
+        # Pair mask built SHARDED from the (padded) token mask — the per-block outer
+        # product, never a full [B, Lpad, Lpad] (matches the recycle / MSA masks).
         with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
-            pair_mask_dt = distribute_tensor(
-                pair_mask.to(torch.bfloat16), mesh, _PAIR
-            )
+            pair_mask_dt = build_sharded_pair_mask(mask_p, mesh).to(torch.bfloat16)
             delta_dt = self.head.folding_trunk.forward_sharded(
                 pair_dt.to(torch.bfloat16), pair_attention_mask=pair_mask_dt
             )

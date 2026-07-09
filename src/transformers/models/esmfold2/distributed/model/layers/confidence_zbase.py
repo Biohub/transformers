@@ -106,23 +106,31 @@ class ConfidenceZBaseDistributed(nn.Module):
         p1_row = row(self.s_to_z_prod_in1(s))      # (B, sLi, d_pair)
         p2_col = col(self.s_to_z_prod_in2(s))      # (B, sLj, d_pair)
 
+        # rel_pos / token_bonds may arrive already sharded (built block-local by
+        # PairInitDistributed) — use the local shard directly; only a full tensor
+        # needs the distribute-then-take-local round trip.
+        def _pair_local(t):
+            if isinstance(t, DTensor):
+                return t.to_local()
+            return distribute_tensor(t.contiguous(), mesh, _PAIR).to_local()
+
         zb = self.z_norm(z).to_local()             # (B, sLi, sLj, d_pair)
         if relative_position_encoding is not None:
-            zb = zb + distribute_tensor(
-                relative_position_encoding.contiguous(), mesh, _PAIR
-            ).to_local()
+            zb = zb + _pair_local(relative_position_encoding)
         if token_bonds_encoding is not None:
-            zb = zb + distribute_tensor(
-                token_bonds_encoding.contiguous(), mesh, _PAIR
-            ).to_local()
+            zb = zb + _pair_local(token_bonds_encoding)
 
         zb = zb + a_row[:, :, None, :] + b_col[:, None, :, :]
         prod = p1_row[:, :, None, :] * p2_col[:, None, :, :]   # (B, sLi, sLj, d_pair)
         zb = zb + F.linear(prod, self.s_to_z_prod_out.weight)
 
-        bins_local = distribute_tensor(
-            distogram_bins.contiguous(), mesh, _PAIR
-        ).to_local()                                # (B, sLi, sLj)
+        # distogram_bins may arrive already sharded (block cdist by
+        # build_sharded_distogram_bins) — take the local shard directly.
+        bins_local = (
+            distogram_bins.to_local()
+            if isinstance(distogram_bins, DTensor)
+            else distribute_tensor(distogram_bins.contiguous(), mesh, _PAIR).to_local()
+        )                                           # (B, sLi, sLj)
         zb = zb + self.dist_bin_pairwise_embed(bins_local)
 
         b_size = zb.shape[0]

@@ -1025,19 +1025,41 @@ class ESMFold2Model(PreTrainedModel):
                 atom_to_token=atom_to_token,
             )
 
-            z_init = self.z_init_1(x_inputs).unsqueeze(2) + self.z_init_2(
-                x_inputs
-            ).unsqueeze(1)
+            # CP (sharded pair-init): build z_init / rel_pos / token_bonds directly
+            # as 2-D-sharded DTensors so the full L×L pair is never resident on any
+            # rank (the init-phase peak that made CP OOM at short L). Installed with
+            # the recycle engine; plain getattr keeps this file CP-agnostic.
+            _cp_pair_init = getattr(self, "_cp_pair_init", None)
+            if _cp_pair_init is not None:
+                (
+                    z_init,
+                    relative_position_encoding,
+                    token_bonds_encoding,
+                    _pi_n_orig,
+                ) = _cp_pair_init(
+                    x_inputs,
+                    residue_index,
+                    asym_id,
+                    sym_id,
+                    entity_id,
+                    token_index,
+                    token_bonds,
+                )
+            else:
+                z_init = self.z_init_1(x_inputs).unsqueeze(2) + self.z_init_2(
+                    x_inputs
+                ).unsqueeze(1)
 
-            relative_position_encoding = self.rel_pos(
-                residue_index=residue_index,
-                asym_id=asym_id,
-                sym_id=sym_id,
-                entity_id=entity_id,
-                token_index=token_index,
-            )
-            token_bonds_encoding = self.token_bonds(token_bonds.float())
-            z_init = z_init + relative_position_encoding + token_bonds_encoding
+                relative_position_encoding = self.rel_pos(
+                    residue_index=residue_index,
+                    asym_id=asym_id,
+                    sym_id=sym_id,
+                    entity_id=entity_id,
+                    token_index=token_index,
+                )
+                token_bonds_encoding = self.token_bonds(token_bonds.float())
+                z_init = z_init + relative_position_encoding + token_bonds_encoding
+                _pi_n_orig = z_init.shape[1]
 
             if (
                 lm_hidden_states is None
@@ -1080,9 +1102,20 @@ class ESMFold2Model(PreTrainedModel):
                 self._esmc.to("cpu")
                 torch.cuda.empty_cache()
 
-            pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
+            # Pair attention mask: sharded block under CP (outer product of the
+            # sliced row/col token-mask, matching evolutionaryscale's _cp_pair_mask
+            # — never the full L×L), else the serial full outer product.
+            if _cp_pair_init is not None:
+                pair_mask = _cp_pair_init.pair_mask(tok_mask)
+            else:
+                pair_mask = tok_mask[:, :, None].float() * tok_mask[:, None, :].float()
 
-            z = self._init_pair_state(z_init)
+            # Initial pair state: sharded random block under CP (never full L×L),
+            # else the serial full draw.
+            if _cp_pair_init is not None:
+                z = _cp_pair_init.init_pair_state(z_init, _pi_n_orig)
+            else:
+                z = self._init_pair_state(z_init)
 
             a, b = self._discretized_dynamics()
             a = a.view(1, 1, 1, -1).to(device=z.device, dtype=z.dtype)
@@ -1114,7 +1147,9 @@ class ESMFold2Model(PreTrainedModel):
             # ``getattr`` keeps this file CP-agnostic.
             _cp_engine = getattr(self, "_cp_recycle_engine", None)
             _z_dt = None
-            _n_orig = z.shape[1]
+            # z may be a sharded DTensor (padded) under CP, so use the pre-pad
+            # token count tracked at pair-init rather than z.shape[1].
+            _n_orig = _pi_n_orig
             if _cp_engine is not None:
                 _z_dt, _n_orig = _cp_engine.run_loop(
                     self,
@@ -1128,6 +1163,7 @@ class ESMFold2Model(PreTrainedModel):
                     tok_mask=tok_mask,
                     total_steps=total_steps,
                     gather=False,
+                    n_orig=_pi_n_orig,
                 )
                 del z_init, lm_z, _msa_inputs, a, b_mat
                 _z_dt = _cp_engine.parcae_finish(self, _z_dt, pair_mask)

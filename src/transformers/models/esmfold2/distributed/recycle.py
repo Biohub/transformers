@@ -96,10 +96,9 @@ class CPRecycleEngine:
         (weight replicated, no token mixing); ``parcae_coda`` is a CP-wrapped
         ``FoldingTrunk`` driven via ``forward_sharded`` (no gather/re-distribute).
         ``z_dt`` is the 2-D-sharded (padded) pair from ``run_loop(gather=False)``;
-        ``pair_mask`` is the full (unpadded) token pair mask. Returns sharded z."""
+        ``pair_mask`` is either the full (unpadded) token pair mask or an already
+        padded + sharded DTensor (from ``PairInitDistributed``). Returns sharded z."""
         mesh = self.device_mesh
-        n = pair_mask.shape[-1]
-        pad = (self.shard_factor - n % self.shard_factor) % self.shard_factor
 
         # parcae_readout: channel Linear on the local shard.
         z_local = z_dt.to_local()
@@ -107,10 +106,15 @@ class CPRecycleEngine:
         z_dt = DTensor.from_local(z_local.contiguous(), mesh, _PLACEMENTS)
 
         # parcae_coda: CP-wrapped trunk → forward_sharded (needs a padded, sharded mask).
-        pm = F.pad(pair_mask, (0, pad, 0, pad)) if pad else pair_mask
-        pair_mask_dt = distribute_tensor(
-            pm.to(z_dt.dtype).contiguous(), mesh, _PLACEMENTS
-        )
+        if isinstance(pair_mask, DTensor):
+            pair_mask_dt = pair_mask.to(z_dt.dtype)
+        else:
+            n = pair_mask.shape[-1]
+            pad = (self.shard_factor - n % self.shard_factor) % self.shard_factor
+            pm = F.pad(pair_mask, (0, pad, 0, pad)) if pad else pair_mask
+            pair_mask_dt = distribute_tensor(
+                pm.to(z_dt.dtype).contiguous(), mesh, _PLACEMENTS
+            )
         return model.parcae_coda.forward_sharded(
             z_dt, pair_attention_mask=pair_mask_dt
         )
@@ -165,8 +169,16 @@ class CPRecycleEngine:
         tok_mask: torch.Tensor,
         total_steps: int,
         gather: bool = True,
+        n_orig: int | None = None,
     ):
         """Sharded equivalent of ``_run_one_loop``.
+
+        ``z`` / ``z_init`` may arrive either as full plain tensors (distributed
+        here, the serial-fallback contract) or as already-padded, already-sharded
+        ``(Shard0, Shard1, Shard2)`` DTensors built by ``PairInitDistributed`` — in
+        which case the full L×L pair is never resident on any rank and ``n_orig``
+        (the pre-pad token count) must be supplied so the returned length is the
+        original, not the padded, count.
 
         With ``gather=True`` (default) returns the gathered full tensor (drop-in
         for the serial loop). With ``gather=False`` returns
@@ -193,7 +205,16 @@ class CPRecycleEngine:
 
         mesh = self.device_mesh
         loop_dtype = z.dtype
-        N = z.shape[1]
+        # z / z_init may be pre-sharded DTensors (PairInitDistributed) or full
+        # tensors (serial fallback). For the DTensor case N is the ORIGINAL token
+        # count (passed as n_orig); z.shape[1] would be the padded length.
+        z_is_dt = isinstance(z, DTensor)
+        z_init_is_dt = isinstance(z_init, DTensor)
+        if z_is_dt:
+            assert n_orig is not None, "n_orig required when z is a pre-sharded DTensor"
+            N = n_orig
+        else:
+            N = z.shape[1]
         pad = (self.shard_factor - N % self.shard_factor) % self.shard_factor
 
         def _pad_pair(t: torch.Tensor) -> torch.Tensor:  # (B, L, L, C)
@@ -208,11 +229,22 @@ class CPRecycleEngine:
             )
 
         # Distribute the persistent loop tensors ONCE (vs. per-boundary in serial).
-        z_dt = distribute_tensor(_pad_pair(z).contiguous(), mesh, _PLACEMENTS)
-        z_init_dt = distribute_tensor(_pad_pair(z_init).contiguous(), mesh, _PLACEMENTS)
-        pair_mask_dt = distribute_tensor(
-            _pad_mask(pair_mask).to(loop_dtype).contiguous(), mesh, _PLACEMENTS
+        # Pre-sharded DTensors (already padded to shard_factor) are used as-is —
+        # no full L×L is ever materialised on a rank.
+        z_dt = z if z_is_dt else distribute_tensor(_pad_pair(z).contiguous(), mesh, _PLACEMENTS)
+        z_init_dt = (
+            z_init
+            if z_init_is_dt
+            else distribute_tensor(_pad_pair(z_init).contiguous(), mesh, _PLACEMENTS)
         )
+        # pair_mask may arrive as a pre-sharded (padded) DTensor (PairInitDistributed)
+        # or a full tensor (serial fallback).
+        if isinstance(pair_mask, DTensor):
+            pair_mask_dt = pair_mask.to(loop_dtype)
+        else:
+            pair_mask_dt = distribute_tensor(
+                _pad_mask(pair_mask).to(loop_dtype).contiguous(), mesh, _PLACEMENTS
+            )
 
         # lm_z may arrive as a sharded (Shard0,Shard1,Shard2) DTensor (#14 —
         # produced full-L×L-free by LanguageModelShimDistributed) or as a full
