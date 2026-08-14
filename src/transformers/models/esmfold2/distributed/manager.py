@@ -187,10 +187,10 @@ class DistributedManager:
         DistributedManager._state["_initialized"] = True
         manager = DistributedManager()
 
-        manager._has_dist = torch.distributed.is_available()  # type: ignore[assignment]
-        manager._rank = rank  # type: ignore[assignment]
-        manager._world_size = world_size  # type: ignore[assignment]
-        manager._node_rank = node_rank  # type: ignore[assignment]
+        manager._has_dist = torch.distributed.is_available()  # ty:ignore[unresolved-attribute]
+        manager._rank = rank  # ty:ignore[unresolved-attribute]
+        manager._world_size = world_size  # ty:ignore[unresolved-attribute]
+        manager._node_rank = node_rank  # ty:ignore[unresolved-attribute]
 
         if device_type == "cuda":
             if (
@@ -199,14 +199,14 @@ class DistributedManager:
             ):
                 warn("world_size is not a multiple of torch.cuda.device_count()")
             if local_rank is None:
-                manager._local_rank = manager.rank % torch.cuda.device_count()  # type: ignore[assignment]
+                manager._local_rank = manager.rank % torch.cuda.device_count()  # ty:ignore[unresolved-attribute]
             else:
-                manager._local_rank = local_rank  # type: ignore[assignment]
-            manager._device = torch.device(f"cuda:{manager.local_rank}")  # type: ignore[assignment]
+                manager._local_rank = local_rank  # ty:ignore[unresolved-attribute]
+            manager._device = torch.device(f"cuda:{manager.local_rank}")  # ty:ignore[unresolved-attribute]
         else:
             if local_rank is not None:
-                manager._local_rank = local_rank  # type: ignore[assignment]
-            manager._device = torch.device("cpu")  # type: ignore[assignment]
+                manager._local_rank = local_rank  # ty:ignore[unresolved-attribute]
+            manager._device = torch.device("cpu")  # ty:ignore[unresolved-attribute]
 
         if not manager.has_dist:
             warn("DistributedManager initialized without torch.distributed package")
@@ -217,7 +217,7 @@ class DistributedManager:
             torch.cuda.device(manager.device)
             torch.cuda.empty_cache()
 
-        manager._backend = backend  # type: ignore[assignment]
+        manager._backend = backend  # ty:ignore[unresolved-attribute]
 
         if manager.device.type == "cuda" and backend == "nccl":
             try:
@@ -248,7 +248,7 @@ class DistributedManager:
         manager._group_ranks["world"] = torch.distributed.get_process_group_ranks(
             manager.group["world"]
         )
-        manager._method_init = method_init  # type: ignore[assignment]
+        manager._method_init = method_init  # ty:ignore[unresolved-attribute]
 
         if grid_group_sizes is not None:
             DistributedManager.create_grid_group(grid_group_sizes)
@@ -430,8 +430,8 @@ class DistributedManager:
         group_rank = os.environ.get("GROUP_RANK", 0)
         node_rank = int(os.environ.get("NODE_RANK", group_rank))
         try:
-            rank = int(rank)  # type: ignore[arg-type]
-            world_size = int(world_size)  # type: ignore[arg-type]
+            rank = int(rank)  # ty:ignore[invalid-argument-type]
+            world_size = int(world_size)  # ty:ignore[invalid-argument-type]
             if local_rank is not None:
                 local_rank = int(local_rank)
         except TypeError:
@@ -444,8 +444,8 @@ class DistributedManager:
             node_rank=node_rank,
             world_size=world_size,
             local_rank=local_rank,
-            addr=os.environ.get("MASTER_ADDR"),  # type: ignore[arg-type]
-            port=os.environ.get("MASTER_PORT"),  # type: ignore[arg-type]
+            addr=os.environ.get("MASTER_ADDR"),  # ty:ignore[invalid-argument-type]
+            port=os.environ.get("MASTER_PORT"),  # ty:ignore[invalid-argument-type]
             method_init="ENV",
             **kwargs,
         )
@@ -468,8 +468,8 @@ class DistributedManager:
         local_rank = os.environ.get("SLURM_LOCALID")
         addr = os.environ.get("SLURM_LAUNCH_NODE_IPADDR")
         try:
-            rank = int(rank)  # type: ignore[arg-type]
-            world_size = int(world_size)  # type: ignore[arg-type]
+            rank = int(rank)  # ty:ignore[invalid-argument-type]
+            world_size = int(world_size)  # ty:ignore[invalid-argument-type]
             if local_rank is not None:
                 local_rank = int(local_rank)
         except TypeError:
@@ -482,7 +482,7 @@ class DistributedManager:
             node_rank=node_rank,
             world_size=world_size,
             local_rank=local_rank,
-            addr=addr,  # type: ignore[arg-type]
+            addr=addr,  # ty:ignore[invalid-argument-type]
             method_init="SLURM",
             **kwargs,
         )

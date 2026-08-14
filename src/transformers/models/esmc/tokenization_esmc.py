@@ -17,8 +17,10 @@ from tokenizers import AddedToken, Tokenizer
 from tokenizers.models import BPE
 from tokenizers.processors import TemplateProcessing
 
-from ...tokenization_utils_fast import PreTrainedTokenizerFast  # type: ignore[import]
-from ...utils import logging  # type: ignore[import]
+from ...tokenization_utils_fast import (  # ty:ignore[unresolved-import]
+    PreTrainedTokenizerFast,
+)
+from ...utils import logging  # ty:ignore[unresolved-import]
 
 logger = logging.get_logger(__name__)
 

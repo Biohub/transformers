@@ -129,12 +129,12 @@ def _fused_dropout_residual_fwd(
         mask_2d,
         out,
         M,
-        D,
-        n_col,
-        n_row * n_col,
-        BLOCK_M=BLOCK_M,
-        BLOCK_D=BLOCK_D,
-        num_warps=4,  # pyright: ignore[reportCallIssue]
+        D,  # ty:ignore[invalid-argument-type]
+        n_col,  # ty:ignore[invalid-argument-type]
+        n_row * n_col,  # ty:ignore[invalid-argument-type]
+        BLOCK_M=BLOCK_M,  # ty:ignore[invalid-argument-type]
+        BLOCK_D=BLOCK_D,  # ty:ignore[invalid-argument-type]
+        num_warps=4,  # ty:ignore[unknown-argument]
     )
     return out
 
@@ -152,12 +152,12 @@ def _fused_dropout_residual_bwd(
         mask_2d,
         ddelta,
         M,
-        D,
-        n_col,
-        n_row * n_col,
-        BLOCK_M=BLOCK_M,
-        BLOCK_D=BLOCK_D,
-        num_warps=4,  # pyright: ignore[reportCallIssue]
+        D,  # ty:ignore[invalid-argument-type]
+        n_col,  # ty:ignore[invalid-argument-type]
+        n_row * n_col,  # ty:ignore[invalid-argument-type]
+        BLOCK_M=BLOCK_M,  # ty:ignore[invalid-argument-type]
+        BLOCK_D=BLOCK_D,  # ty:ignore[invalid-argument-type]
+        num_warps=4,  # ty:ignore[unknown-argument]
     )
     return ddelta
 
@@ -244,4 +244,4 @@ class FusedDropoutResidual(nn.Module):
         shape[1] = 1  # row-shared mask: [B, 1, N_col, D]
         ones = delta.new_ones(shape)
         mask = torch.nn.functional.dropout(ones, p=self.r, training=True)
-        return FusedDropoutResidualFn.apply(pair, delta, mask)  # type: ignore[return-value]
+        return FusedDropoutResidualFn.apply(pair, delta, mask)

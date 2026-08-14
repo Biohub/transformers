@@ -36,9 +36,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from ...modeling_outputs import ModelOutput  # type: ignore[import]
-from ...modeling_utils import PreTrainedModel  # type: ignore[import]
-from ...utils import auto_docstring  # type: ignore[import]
+from ...modeling_outputs import ModelOutput  # ty:ignore[unresolved-import]
+from ...modeling_utils import PreTrainedModel  # ty:ignore[unresolved-import]
+from ...utils import auto_docstring  # ty:ignore[unresolved-import]
 from .configuration_esmc_sae import ESMCSAEConfig, ESMCSAEParams
 
 
@@ -160,7 +160,7 @@ class ESMCSAEModel(ESMCSAEPreTrainedModel):
         self.post_init()
 
     @classmethod
-    def from_pretrained(  # type: ignore[override]
+    def from_pretrained(
         cls, pretrained_model_name_or_path: str | os.PathLike, *model_args, **kwargs
     ) -> "ESMCSAEModel":
         """Download (or reuse cached) the full repo and return the model.
@@ -304,7 +304,7 @@ class ESMCSAEModel(ESMCSAEPreTrainedModel):
             )
         return self.layers[key](x, **kwargs)
 
-    def save_pretrained(  # type: ignore[override]
+    def save_pretrained(
         self, save_directory: str | os.PathLike, *args, **kwargs
     ) -> None:
         """Write ``config.json`` plus one ``layer_{i}.safetensors`` per loaded layer.

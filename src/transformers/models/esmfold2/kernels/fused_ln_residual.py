@@ -210,12 +210,12 @@ def _ln_fwd(
         mean,
         rstd,
         M,
-        D=D,
-        EPS=eps,
-        LAYOUT=layout_int,
-        TILE_M=_FWD_TILE_M,
-        num_warps=_FWD_NUM_WARPS,  # type: ignore[call-arg]
-        num_stages=_FWD_NUM_STAGES,  # type: ignore[call-arg]
+        D=D,  # ty:ignore[invalid-argument-type]
+        EPS=eps,  # ty:ignore[invalid-argument-type]
+        LAYOUT=layout_int,  # ty:ignore[invalid-argument-type]
+        TILE_M=_FWD_TILE_M,  # ty:ignore[invalid-argument-type]
+        num_warps=_FWD_NUM_WARPS,  # ty:ignore[unknown-argument]
+        num_stages=_FWD_NUM_STAGES,  # ty:ignore[unknown-argument]
     )
     return out, mean, rstd
 
@@ -258,12 +258,12 @@ def _ln_bwd(
         grad_b_partial,
         grad_residual if has_residual else _dummy,
         M,
-        D=D,
-        LAYOUT=layout_int,
-        HAS_RESIDUAL=has_residual,
-        TILE_M=_BWD_TILE_M,
-        num_warps=_BWD_NUM_WARPS,  # type: ignore[call-arg]
-        num_stages=_BWD_NUM_STAGES,  # type: ignore[call-arg]
+        D=D,  # ty:ignore[invalid-argument-type]
+        LAYOUT=layout_int,  # ty:ignore[invalid-argument-type]
+        HAS_RESIDUAL=has_residual,  # ty:ignore[invalid-argument-type]
+        TILE_M=_BWD_TILE_M,  # ty:ignore[invalid-argument-type]
+        num_warps=_BWD_NUM_WARPS,  # ty:ignore[unknown-argument]
+        num_stages=_BWD_NUM_STAGES,  # ty:ignore[unknown-argument]
     )
 
     grad_w = grad_w_partial.sum(dim=0).to(w.dtype)
@@ -287,7 +287,7 @@ class _LayerNormTransposeFn(torch.autograd.Function):
         return out_bnd.view(*out_shape)
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):  # type: ignore[override]
+    def backward(ctx, grad_out: torch.Tensor):
         x_view, w, mean, rstd = ctx.saved_tensors
         grad_y = grad_out.contiguous().view(ctx.M, ctx.D)
         grad_x, grad_w, grad_b = _ln_bwd(
@@ -305,7 +305,7 @@ def fused_ln_transpose(
     layout: str = "bijd->bijd",
 ) -> torch.Tensor:
     """Plain LN replacement for ``layer_norm_transpose`` (no residual fusion)."""
-    return _LayerNormTransposeFn.apply(x, w, b, eps, layout)  # type: ignore[return-value]
+    return _LayerNormTransposeFn.apply(x, w, b, eps, layout)
 
 
 # Stage-1 LN with residual-add folded into the bwd kernel. The Function returns
@@ -347,7 +347,7 @@ class _LayerNormWithResidualLinkFn(torch.autograd.Function):
         return ln_out, residual_link.view_as(residual_link)
 
     @staticmethod
-    def backward(ctx, grad_ln_out: torch.Tensor, grad_link_pass: torch.Tensor):  # type: ignore[override]
+    def backward(ctx, grad_ln_out: torch.Tensor, grad_link_pass: torch.Tensor):
         x_view, w, mean, rstd = ctx.saved_tensors
         grad_y = grad_ln_out.contiguous().view(ctx.M, ctx.D)
 
@@ -394,4 +394,4 @@ def fused_ln_with_residual_link(
             "fused_ln_with_residual_link requires x and residual_link to be the "
             "same tensor instance (the caller must wire pair → both)."
         )
-    return _LayerNormWithResidualLinkFn.apply(x, w, b, residual_link, eps, layout)  # type: ignore[return-value]
+    return _LayerNormWithResidualLinkFn.apply(x, w, b, residual_link, eps, layout)

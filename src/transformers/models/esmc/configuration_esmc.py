@@ -13,7 +13,7 @@
 # limitations under the License.
 """ESMC model configuration."""
 
-from ...configuration_utils import PretrainedConfig  # type: ignore[import]
+from ...configuration_utils import PretrainedConfig  # ty:ignore[unresolved-import]
 
 
 class ESMCConfig(PretrainedConfig):

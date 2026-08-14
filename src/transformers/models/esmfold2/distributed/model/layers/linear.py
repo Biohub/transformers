@@ -96,7 +96,7 @@ class _LinearParamsReplicatedImpl(torch.autograd.Function):
         if ctx.needs_input_grad[1]:
             # Aggregate over all but the last two dims (batch + seq dims)
             dw = torch.einsum("...i,...j->ij", d_out_local, x_saved)
-            dw = dw.contiguous()  # type: ignore[union-attr]
+            dw = dw.contiguous()
             op = dist.ReduceOp.AVG if ctx.avg_reduce else dist.ReduceOp.SUM
             dw_work = dist.all_reduce(dw, op=op, group=ctx.reduce_group, async_op=True)
 
@@ -127,22 +127,22 @@ class _LinearParamsReplicatedImpl(torch.autograd.Function):
         if dw_work is not None:
             dw_work.wait()
             dw_dtensor = DTensor.from_local(
-                dw,  # type: ignore[arg-type]
+                dw,  # ty:ignore[invalid-argument-type]
                 device_mesh=ctx.device_mesh,
                 placements=replicate,
-                shape=dw.shape,  # type: ignore[union-attr]
-                stride=dw.stride(),  # type: ignore[union-attr]
+                shape=dw.shape,  # ty:ignore[unresolved-attribute]
+                stride=dw.stride(),  # ty:ignore[unresolved-attribute]
             )
 
         db_dtensor: Optional[DTensor] = None
         if db_work is not None:
             db_work.wait()
             db_dtensor = DTensor.from_local(
-                db,  # type: ignore[arg-type]
+                db,  # ty:ignore[invalid-argument-type]
                 device_mesh=ctx.device_mesh,
                 placements=replicate,
-                shape=db.shape,  # type: ignore[union-attr]
-                stride=db.stride(),  # type: ignore[union-attr]
+                shape=db.shape,  # ty:ignore[unresolved-attribute]
+                stride=db.stride(),  # ty:ignore[unresolved-attribute]
             )
 
         return dx_dtensor, dw_dtensor, db_dtensor, None, None
@@ -188,12 +188,12 @@ class LinearParamsReplicated(nn.Module):
             self.bias = None
 
         # Choose reduce group: use cp group if present, otherwise world
-        if "cp" in device_mesh.mesh_dim_names:  # type: ignore[operator]
+        if "cp" in device_mesh.mesh_dim_names:  # ty:ignore[unsupported-operator]
             self._reduce_group = device_mesh.get_group("cp")
         else:
             self._reduce_group = dist.group.WORLD
 
     def forward(self, x: DTensor) -> DTensor:
-        return _LinearParamsReplicatedImpl.apply(  # type: ignore[return-value]
+        return _LinearParamsReplicatedImpl.apply(
             x, self.weight, self.bias, self._reduce_group, self.avg_reduce
         )

@@ -128,7 +128,7 @@ class _LayerNormParamsReplicatedImpl(torch.autograd.Function):
 
         replicate = [Replicate()] * ctx.device_mesh.ndim
         if ctx.needs_input_grad[2]:
-            dw_work.wait()  # type: ignore[union-attr]
+            dw_work.wait()
             dw_dtensor = DTensor.from_local(
                 dw,
                 device_mesh=ctx.device_mesh,
@@ -137,7 +137,7 @@ class _LayerNormParamsReplicatedImpl(torch.autograd.Function):
                 stride=dw.stride(),
             )
         if ctx.needs_input_grad[3]:
-            db_work.wait()  # type: ignore[union-attr]
+            db_work.wait()
             db_dtensor = DTensor.from_local(
                 db,
                 device_mesh=ctx.device_mesh,
@@ -189,13 +189,13 @@ class LayerNormParamsReplicated(nn.Module):
         else:
             self.bias = None
 
-        if "cp" in device_mesh.mesh_dim_names:  # type: ignore[operator]
+        if "cp" in device_mesh.mesh_dim_names:  # ty:ignore[unsupported-operator]
             self._reduce_group = device_mesh.get_group("cp")
         else:
             self._reduce_group = dist.group.WORLD
 
     def forward(self, x: DTensor) -> DTensor:
-        return _LayerNormParamsReplicatedImpl.apply(  # type: ignore[return-value]
+        return _LayerNormParamsReplicatedImpl.apply(
             x,
             self.normalized_shape,
             self.weight,

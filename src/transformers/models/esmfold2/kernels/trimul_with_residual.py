@@ -84,7 +84,7 @@ def _gated_gemm_with_residual_kernel(
     GROUP_M: tl.constexpr,
     PRECISION: tl.constexpr,
     HAS_DROP_MASK: tl.constexpr,
-    NEEDS_INT64: tl.constexpr = True,  # type: ignore[assignment]
+    NEEDS_INT64: tl.constexpr = True,  # ty:ignore[invalid-parameter-default]
 ):
     pid_m_raw = tl.program_id(axis=0)
     pid_n_raw = tl.program_id(axis=1)
@@ -222,7 +222,7 @@ def _gated_gemm_with_residual_backward_kernel(
     TILE_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     HAS_DROP_MASK: tl.constexpr,
-    NEEDS_INT64: tl.constexpr = True,  # type: ignore[assignment]
+    NEEDS_INT64: tl.constexpr = True,  # ty:ignore[invalid-parameter-default]
 ):
     pid_m_raw = tl.program_id(axis=0)
     pid_n_raw = tl.program_id(axis=1)
@@ -342,9 +342,9 @@ def _gated_gemm_with_residual_bwd(
     M, K = x1.shape
     N = w1.shape[0]
     assert x2.shape == x1.shape
-    assert (
-        w1.dtype == w2.dtype == torch.bfloat16
-    ), f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    assert w1.dtype == w2.dtype == torch.bfloat16, (
+        f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    )
     assert x1.dtype == torch.bfloat16 and x2.dtype == torch.bfloat16
 
     # Don't call .contiguous() unconditionally (avoids a full-tensor clone).
@@ -440,7 +440,7 @@ class GatedGEMMWithResidual(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):  # type: ignore[override]
+    def backward(ctx, grad_out: torch.Tensor):
         if ctx.has_drop_mask:
             x1, x2, w1, w2, drop_mask = ctx.saved_tensors
         else:
@@ -523,7 +523,7 @@ def _gated_gemm_with_residual(
         or w2.requires_grad
         or residual.requires_grad
     ):
-        return GatedGEMMWithResidual.apply(  # type: ignore[return-value]
+        return GatedGEMMWithResidual.apply(
             x1, x2, w1, w2, residual, drop_mask, n_row, n_col, precision
         )
     return _gated_gemm_with_residual_fwd(
@@ -586,11 +586,11 @@ def triangle_multiplicative_update_with_residual(
     # then a view/permute reaches the dbij layout downstream.
     a, b_t = fused_gated_dual_gemm_split(x, g_in_weight, p_in_weight, mask=mask)
 
-    # Stage 3: triangular einsum.
-    # Training: native (D, B, L, L) Triton kernel — its bwd reads the layout
-    # natively, eliminating the contiguous copy torch.einsum's autograd does.
-    # Inference: torch.einsum (cuBLAS bgemm) is faster fwd-only.
-    if torch.is_grad_enabled():
+    # Stage 3: triangular einsum. The TILE_M=TILE_N=128 Triton kernel wins
+    # fwd+bwd on aligned lengths, but loses off-grid from wave quantization;
+    # inference stays on cuBLAS because the Triton kernel's edge is in backward.
+    _use_triton_einsum = torch.is_grad_enabled() and L_col % 128 == 0
+    if _use_triton_einsum:
         x = trimul_batched_einsum(a, b_t, direction)
     elif direction == "outgoing":
         x = torch.einsum("dbik,dbjk->dbij", a, b_t)

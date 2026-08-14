@@ -21,20 +21,17 @@ import torch.nn.functional as F
 from torch import Tensor
 
 try:
-    import transformer_engine.pytorch as te  # type: ignore[import]
-    from transformer_engine.common.recipe import (  # type: ignore[import]
-        DelayedScaling,
-        Format,
-    )
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
 
     TE_AVAILABLE = True
 except ImportError:
-    te = None  # type: ignore[assignment]
-    DelayedScaling = None  # type: ignore[assignment]
-    Format = None  # type: ignore[assignment]
+    te = None  # ty:ignore[invalid-assignment]
+    DelayedScaling = None  # ty:ignore[invalid-assignment]
+    Format = None  # ty:ignore[invalid-assignment]
     TE_AVAILABLE = False
 
-from ...modeling_utils import PreTrainedModel  # type: ignore[import]
+from ...modeling_utils import PreTrainedModel  # ty:ignore[unresolved-import]
 from .configuration_esmfold2 import ESMFold2Config
 from .modeling_esmfold2_common import (
     CHAR_VOCAB_SIZE,
@@ -320,17 +317,21 @@ class ConfidenceHead(nn.Module):
         pair_chains_iptm = torch.zeros(
             Bm, n_chains, n_chains, device=tm_expected.device, dtype=tm_expected.dtype
         )
+        # pair_chains_iptm[c1, c2] = max over rows i in chain c2 of the mean over
+        # columns j in chain c1 of tm_expected[i, j] (max-of-row-mean, as in the
+        # global iptm above), so iptm equals the max off-diagonal entry.
         for c1 in range(n_chains):
             chain_c1 = (expanded_asym == c1).float() * mask_f
             if chain_c1.sum() == 0:
                 continue
+            col_mask = chain_c1.unsqueeze(-2)
+            avg_tm = (tm_expected * col_mask).sum(dim=-1) / (
+                col_mask.sum(dim=-1) + _EPS
+            )
             for c2 in range(n_chains):
                 chain_c2 = (expanded_asym == c2).float() * mask_f
-                pair_m = chain_c1.unsqueeze(-1) * chain_c2.unsqueeze(-2)
-                denom = pair_m.sum(dim=(-1, -2)) + _EPS
-                pair_chains_iptm[:, c1, c2] = (tm_expected * pair_m).sum(
-                    dim=(-1, -2)
-                ) / denom
+                row_vals = avg_tm.masked_fill(chain_c2 == 0, float("-inf"))
+                pair_chains_iptm[:, c1, c2] = row_vals.max(dim=-1).values.clamp(min=0.0)
 
         return {
             "plddt_logits": plddt_logits,
@@ -362,7 +363,7 @@ def _convert_te_modules_to_fp8_inplace(module: nn.Module) -> None:
     """
     if not TE_AVAILABLE:
         raise RuntimeError("transformer_engine is not available; cannot use fp8.")
-    from transformer_engine.pytorch import quantized_model_init  # type: ignore[import]
+    from transformer_engine.pytorch import quantized_model_init
 
     def _walk(mod: nn.Module) -> None:
         for name, child in list(mod.named_children()):
@@ -378,16 +379,16 @@ def _convert_te_modules_to_fp8_inplace(module: nn.Module) -> None:
                 del child
                 torch.cuda.empty_cache()
                 with quantized_model_init(enabled=True):
-                    new_mod = te.Linear(  # type: ignore[union-attr]
+                    new_mod = te.Linear(
                         in_f, out_f, bias=has_bias, params_dtype=dtype
                     ).to(device)
-                new_mod.weight.quantize_(w)  # type: ignore[attr-defined,operator]
+                new_mod.weight.quantize_(w)  # ty:ignore[call-non-callable, unresolved-attribute]
                 if has_bias:
                     assert b is not None
-                    new_mod.bias.data.copy_(b)  # type: ignore[union-attr]
+                    new_mod.bias.data.copy_(b)  # ty:ignore[call-non-callable]
                 del w, b
                 replaced = True
-            elif isinstance(child, te.Linear):  # type: ignore[union-attr]
+            elif isinstance(child, te.Linear):
                 # te.Linear with bf16 weight → re-init inside quantized_model_init for fp8.
                 in_f, out_f = child.in_features, child.out_features
                 has_bias = child.bias is not None
@@ -402,16 +403,13 @@ def _convert_te_modules_to_fp8_inplace(module: nn.Module) -> None:
                 del child
                 torch.cuda.empty_cache()
                 with quantized_model_init(enabled=True):
-                    new_mod = te.Linear(  # type: ignore[union-attr]
-                        in_f,
-                        out_f,
-                        bias=has_bias,
-                        params_dtype=dtype,  # type: ignore[arg-type]
-                    ).to(device)  # type: ignore[arg-type]
+                    new_mod = te.Linear(
+                        in_f, out_f, bias=has_bias, params_dtype=dtype
+                    ).to(device)  # ty:ignore[no-matching-overload]
                 new_mod.load_state_dict(state, strict=False)
                 replaced = True
-            elif (
-                hasattr(te, "LayerNormLinear") and isinstance(child, te.LayerNormLinear)  # type: ignore[union-attr]
+            elif hasattr(te, "LayerNormLinear") and isinstance(
+                child, te.LayerNormLinear
             ):
                 state = {k: v.detach().clone() for k, v in child.state_dict().items()}
                 hidden_size = child.in_features
@@ -422,7 +420,7 @@ def _convert_te_modules_to_fp8_inplace(module: nn.Module) -> None:
                 del child
                 torch.cuda.empty_cache()
                 with quantized_model_init(enabled=True):
-                    new_mod = te.LayerNormLinear(  # type: ignore[union-attr]
+                    new_mod = te.LayerNormLinear(
                         hidden_size,
                         out_features,
                         bias=has_bias,
@@ -430,30 +428,28 @@ def _convert_te_modules_to_fp8_inplace(module: nn.Module) -> None:
                     ).to(device)
                 new_mod.load_state_dict(state, strict=False)
                 replaced = True
-            elif (
-                hasattr(te, "LayerNormMLP") and isinstance(child, te.LayerNormMLP)  # type: ignore[union-attr]
-            ):
+            elif hasattr(te, "LayerNormMLP") and isinstance(child, te.LayerNormMLP):
                 state = {k: v.detach().clone() for k, v in child.state_dict().items()}
-                fc1_weight: Tensor = child.fc1_weight  # type: ignore[attr-defined]
+                fc1_weight: Tensor = child.fc1_weight  # ty:ignore[invalid-assignment]
                 hidden_size = int(fc1_weight.shape[1])
                 # fc1 packed as (2*ffn_hidden_size, hidden_size) for swiglu.
                 ffn_hidden_size = int(fc1_weight.shape[0]) // 2
                 has_bias = (
                     getattr(child, "fc1_bias", None) is not None
-                    and child.fc1_bias is not None  # type: ignore[attr-defined]
+                    and child.fc1_bias is not None
                 )
                 device = fc1_weight.device
                 setattr(mod, name, nn.Identity())
                 del child
                 torch.cuda.empty_cache()
                 with quantized_model_init(enabled=True):
-                    new_mod = te.LayerNormMLP(  # type: ignore[union-attr]
+                    new_mod = te.LayerNormMLP(
                         hidden_size=hidden_size,
                         ffn_hidden_size=ffn_hidden_size,
                         bias=has_bias,
                         activation="swiglu",
                         params_dtype=torch.bfloat16,
-                    ).to(device)  # type: ignore[arg-type]
+                    ).to(device)
                 new_mod.load_state_dict(state, strict=False)
                 replaced = True
 
@@ -478,12 +474,12 @@ def _lm_precision_context(fp8: bool):
     """
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         if fp8 and TE_AVAILABLE:
-            fp8_recipe = DelayedScaling(  # type: ignore[misc]
-                fp8_format=Format.HYBRID,  # type: ignore[union-attr]
+            fp8_recipe = DelayedScaling(
+                fp8_format=Format.HYBRID,
                 amax_history_len=1,
                 amax_compute_algo="most_recent",
             )
-            with te.autocast(enabled=True, recipe=fp8_recipe):  # type: ignore[union-attr]
+            with te.autocast(enabled=True, recipe=fp8_recipe):
                 yield
         else:
             yield
@@ -678,10 +674,10 @@ class ESMFold2Model(PreTrainedModel):
         """
         import torch._dynamo
 
-        torch._dynamo.config.cache_size_limit = 512  # type: ignore[attr-defined]
-        torch._dynamo.config.accumulated_cache_size_limit = 512  # type: ignore[attr-defined]
+        torch._dynamo.config.cache_size_limit = 512
+        torch._dynamo.config.accumulated_cache_size_limit = 512
         # capture_scalar_outputs avoids graph breaks at .item() in atom-attention path.
-        torch._dynamo.config.capture_scalar_outputs = True  # type: ignore[attr-defined]
+        torch._dynamo.config.capture_scalar_outputs = True
 
         if dynamic is None:
             dynamic = mode == "dynamic_seqlen"
@@ -702,7 +698,7 @@ class ESMFold2Model(PreTrainedModel):
 
         def _maybe_compile(module: nn.Module) -> None:
             if isinstance(module, compile_targets):
-                module.forward = torch.compile(module.forward, **kwargs)  # type: ignore[assignment]
+                module.forward = torch.compile(module.forward, **kwargs)  # ty:ignore[invalid-assignment]
 
         self.apply(_maybe_compile)
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-from ...configuration_utils import PretrainedConfig  # type: ignore[import]
+from ...configuration_utils import PretrainedConfig  # ty:ignore[unresolved-import]
 
 # ---------------------------------------------------------------------------
 # Nested dataclass configs
@@ -90,7 +90,7 @@ class InputsEmbedderConfig:
 
     def __post_init__(self):
         if isinstance(self.atom_encoder, dict):
-            self.atom_encoder = AtomAttentionConfig(**self.atom_encoder)
+            self.atom_encoder = AtomAttentionConfig(**self.atom_encoder)  # ty:ignore[invalid-argument-type]
 
 
 @dataclass
@@ -139,7 +139,7 @@ class DiffusionStructureHeadConfig:
 
     def __post_init__(self):
         if isinstance(self.diffusion_module, dict):
-            self.diffusion_module = DiffusionModuleConfig(**self.diffusion_module)
+            self.diffusion_module = DiffusionModuleConfig(**self.diffusion_module)  # ty:ignore[invalid-argument-type]
 
 
 @dataclass
@@ -157,7 +157,7 @@ class ConfidenceHeadConfig:
 
     def __post_init__(self):
         if isinstance(self.folding_trunk, dict):
-            self.folding_trunk = FoldingTrunkConfig(**self.folding_trunk)
+            self.folding_trunk = FoldingTrunkConfig(**self.folding_trunk)  # ty:ignore[invalid-argument-type]
 
 
 # ---------------------------------------------------------------------------

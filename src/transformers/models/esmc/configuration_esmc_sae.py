@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass
 
-from ...configuration_utils import PretrainedConfig  # type: ignore[import]
+from ...configuration_utils import PretrainedConfig  # ty:ignore[unresolved-import]
 
 
 @dataclass

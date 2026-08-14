@@ -23,56 +23,44 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 try:
-    from flash_attn import (  # type: ignore[import]
-        flash_attn_func,
-        flash_attn_varlen_func,
-    )
-    from flash_attn.bert_padding import (  # type: ignore[import]
-        index_first_axis,
-        pad_input,
-    )
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn.bert_padding import index_first_axis, pad_input
 
     FLASH_ATTN_AVAILABLE = True
 except ImportError:
-    flash_attn_func = None  # type: ignore[assignment]
-    flash_attn_varlen_func = None  # type: ignore[assignment]
-    index_first_axis = None  # type: ignore[assignment]
-    pad_input = None  # type: ignore[assignment]
+    flash_attn_func = None  # ty:ignore[invalid-assignment]
+    flash_attn_varlen_func = None  # ty:ignore[invalid-assignment]
+    index_first_axis = None  # ty:ignore[invalid-assignment]
+    pad_input = None  # ty:ignore[invalid-assignment]
     FLASH_ATTN_AVAILABLE = False
 
 try:
-    from cuequivariance_torch import (  # type: ignore[import]
-        attention_pair_bias as _cue_attn_pair_bias,
-    )
-    from cuequivariance_torch.primitives.triangle import (  # type: ignore[import]
+    from cuequivariance_torch import attention_pair_bias as _cue_attn_pair_bias
+    from cuequivariance_torch.primitives.triangle import (
         triangle_multiplicative_update as _cue_tri_mul,
     )
 
     CUE_AVAILABLE = True
 except ImportError:
-    _cue_attn_pair_bias = None  # type: ignore[assignment]
-    _cue_tri_mul = None  # type: ignore[assignment]
+    _cue_attn_pair_bias = None  # ty:ignore[invalid-assignment]
+    _cue_tri_mul = None  # ty:ignore[invalid-assignment]
     CUE_AVAILABLE = False
 
 # Vendored inference-only Triton kernels.
 try:
+    from .kernels import FusedDropoutResidual as _FusedDropoutResidual
+    from .kernels import FusedLNLinearSwiGLU as _FusedLNLinearSwiGLU
+    from .kernels import fused_pair_bias as _fused_pair_bias
     from .kernels import (
-        FusedDropoutResidual as _FusedDropoutResidual,  # type: ignore[import]
-    )
-    from .kernels import (
-        FusedLNLinearSwiGLU as _FusedLNLinearSwiGLU,  # type: ignore[import]
-    )
-    from .kernels import fused_pair_bias as _fused_pair_bias  # type: ignore[import]
-    from .kernels import (  # type: ignore[import]
         triangle_multiplicative_update_with_residual as _fused_trimul_with_residual,
     )
 
     TRITON_KERNELS_AVAILABLE = True
 except ImportError:
-    _fused_pair_bias = None  # type: ignore[assignment]
-    _fused_trimul_with_residual = None  # type: ignore[assignment]
-    _FusedLNLinearSwiGLU = None  # type: ignore[assignment]
-    _FusedDropoutResidual = None  # type: ignore[assignment]
+    _fused_pair_bias = None
+    _fused_trimul_with_residual = None
+    _FusedLNLinearSwiGLU = None  # ty:ignore[invalid-assignment]
+    _FusedDropoutResidual = None  # ty:ignore[invalid-assignment]
     TRITON_KERNELS_AVAILABLE = False
 
 from .configuration_esmfold2 import ESMFold2Config
@@ -80,6 +68,11 @@ from .configuration_esmfold2 import ESMFold2Config
 BACKEND_FUSED = "fused"
 BACKEND_CUEQ = "cuequivariance"
 _VALID_BACKENDS = (None, BACKEND_FUSED, BACKEND_CUEQ)
+
+# The vendored fused Triton kernels (LN+SwiGLU, trimul-with-residual) operate in
+# bfloat16 only. Single-source that dtype here so every fused-path buffer and
+# cast references one named constant instead of scattering ``torch.bfloat16``.
+_FUSED_KERNEL_DTYPE = torch.bfloat16
 
 
 def _fused_active(module: nn.Module, tensor: Tensor) -> bool:
@@ -90,6 +83,20 @@ def _fused_active(module: nn.Module, tensor: Tensor) -> bool:
         and not torch.is_grad_enabled()
         and tensor.is_cuda
     )
+
+
+def _fused_pair_stack_active(module: nn.Module, tensor: Tensor) -> bool:
+    """Fused pair-stack kernels that support autograd."""
+    return (
+        TRITON_KERNELS_AVAILABLE
+        and getattr(module, "_kernel_backend", None) == BACKEND_FUSED
+        and tensor.is_cuda
+    )
+
+
+def _to_fused_kernel_dtype(t: Tensor) -> Tensor:
+    """Cast ``t`` to the fused-kernel dtype (no-op if already that dtype)."""
+    return t if t.dtype == _FUSED_KERNEL_DTYPE else t.to(_FUSED_KERNEL_DTYPE)
 
 
 def _cueq_active(module: nn.Module) -> bool:
@@ -581,16 +588,16 @@ class SWA3DRoPEAttention(nn.Module):
                 attention_params[3],
                 attention_params[4],
             )
-            q_unpad = index_first_axis(  # type: ignore[misc]
+            q_unpad = index_first_axis(
                 q.reshape(-1, self.n_heads, self.head_dim), indices
             )
-            k_unpad = index_first_axis(  # type: ignore[misc]
+            k_unpad = index_first_axis(
                 k.reshape(-1, self.n_heads, self.head_dim), indices
             )
-            v_unpad = index_first_axis(  # type: ignore[misc]
+            v_unpad = index_first_axis(
                 v.reshape(-1, self.n_heads, self.head_dim), indices
             )
-            out_unpad = flash_attn_varlen_func(  # type: ignore[misc]
+            out_unpad = flash_attn_varlen_func(
                 q_unpad,
                 k_unpad,
                 v_unpad,
@@ -601,9 +608,9 @@ class SWA3DRoPEAttention(nn.Module):
                 softmax_scale=self.scale,
                 window_size=(self.half_window, self.half_window),
             )
-            out = pad_input(out_unpad, indices, B, N)  # type: ignore[misc]
+            out = pad_input(out_unpad, indices, B, N)
         elif FLASH_ATTN_AVAILABLE:
-            out = flash_attn_func(  # type: ignore[misc]
+            out = flash_attn_func(
                 q,
                 k,
                 v,
@@ -630,7 +637,7 @@ class SWA3DRoPEAttention(nn.Module):
             ).transpose(1, 2)
             out = out * valid.unsqueeze(-1).unsqueeze(-1)
 
-        out = out.to(input_dtype).reshape(B, N, -1)  # type: ignore[union-attr]
+        out = out.to(input_dtype).reshape(B, N, -1)
         out = out * torch.sigmoid(self.gate_proj(x_input))
         return self.out_proj(out)
 
@@ -1122,14 +1129,14 @@ class AttentionPairBias(nn.Module):
                 else torch.zeros_like(pair_norm_w)
             )
             z_bf = z if z.dtype == torch.bfloat16 else z.to(torch.bfloat16)
-            bias = _fused_pair_bias(  # type: ignore[misc]
+            bias = _fused_pair_bias(
                 z_bf,
                 kernel_mask,
                 self.pair_bias_proj.weight,
                 num_heads=self.num_heads,
                 pair_norm_w=pair_norm_w,
                 pair_norm_b=pair_norm_b,
-            )  # (B, H, Q, K)
+            )  # (B, H, Q, K)  # ty:ignore[call-non-callable]
             q_bhqd = q.transpose(1, 2)
             k_bhqd = k.transpose(1, 2)
             v_bhqd = v.transpose(1, 2)
@@ -1151,7 +1158,7 @@ class AttentionPairBias(nn.Module):
                 if attention_mask is not None
                 else torch.ones(bsz, n_queries, device=a.device, dtype=torch.bool)
             )
-            out, _ = _cue_attn_pair_bias(  # type: ignore[misc]
+            out, _ = _cue_attn_pair_bias(
                 s=x,
                 q=q.transpose(1, 2),
                 k=k.transpose(1, 2),
@@ -1794,11 +1801,11 @@ class DiffusionStructureHead(nn.Module):
     ) -> dict[str, Tensor | None]:
         """Diffusion sampling (Algorithm 18).
 
-        The Karras schedule is built with ``num_sampling_steps`` entries, then
-        clipped to ``max_inference_sigma`` (the high-σ tail above the cap is
-        dropped and the cap prepended). The number of denoising steps actually
-        run is therefore fewer than ``num_sampling_steps`` whenever the schedule
-        extends above the cap.
+        ``num_sampling_steps`` is the number of denoising steps actually run.
+        When ``max_inference_sigma`` is set, the Karras schedule built with
+        ``num_sampling_steps`` entries would lose its high-σ tail to the cap,
+        so we inflate the underlying schedule length here to land back at the
+        requested step count post-truncation.
         """
         n_atoms = tok_idx.shape[1]
         device = s_inputs.device
@@ -2418,7 +2425,7 @@ class TriangleMultiplicativeBlock(nn.Module):
             p_in_weight, g_in_weight = self.split_kernel_weights()
 
             try:
-                return _cue_tri_mul(  # type: ignore[misc]
+                return _cue_tri_mul(
                     pair_grid,
                     direction=self._kernel_flow_direction(),
                     mask=visibility,
@@ -2522,18 +2529,17 @@ class Transition(nn.Module):
             d_inner = self.ffn.hidden_features
             has_ln_bias = self.norm.bias is not None
             device = self.ffn.w12.weight.device
-            dtype = self.ffn.w12.weight.dtype
             fused = _FusedLNLinearSwiGLU(
                 d_model=d_model,
                 d_inner=d_inner,
                 has_ln_bias=has_ln_bias,
                 device=device,
-                dtype=dtype,
+                dtype=_FUSED_KERNEL_DTYPE,
             )
             with torch.no_grad():
                 fused.LN_W.copy_(self.norm.weight)
                 if has_ln_bias:
-                    fused.LN_B.copy_(self.norm.bias)  # type: ignore[union-attr]
+                    fused.LN_B.copy_(self.norm.bias)  # ty:ignore[unresolved-attribute]
                 # FusedLNLinearSwiGLU.W12 is (d_model, 2*d_inner); transpose nn.Linear once.
                 fused.W12.copy_(self.ffn.w12.weight.t().contiguous())
             self._fused_swiglu = fused.eval().requires_grad_(False)
@@ -2542,9 +2548,10 @@ class Transition(nn.Module):
 
     def _can_use_fused_path(self, x: Tensor) -> bool:
         return (
-            _fused_active(self, x)
+            _fused_pair_stack_active(self, x)
             and self._fused_swiglu is not None
-            and x.dtype == torch.bfloat16
+            and x.dtype == _FUSED_KERNEL_DTYPE
+            and self._fused_swiglu.W12.dtype == x.dtype
         )
 
     def _swiglu_pre_w3(self, x_normed: Tensor) -> Tensor:
@@ -2561,16 +2568,13 @@ class Transition(nn.Module):
         out = torch.addmm(
             x.contiguous().view(-1, x_shape[-1]),
             hidden.view(-1, hidden.shape[-1]),
-            ffn.w3.weight.t(),
+            ffn.w3.weight.t().to(_FUSED_KERNEL_DTYPE),
         )
         return out.view(x_shape)
 
     def forward(self, x: Tensor) -> Tensor:
-        # Inference-only fast path (addmm-fused residual + pre-alloc out)
-        # — diverges bit-exactly from ``x + ffn(norm(x))`` so we only use
-        # it when grad is disabled (binder-design / bit-exact tests run
-        # with grad on and need the reference path).
-        if not torch.is_grad_enabled() and self._can_use_fused_path(x):
+        # Fused fast path (addmm-fused residual).
+        if self._can_use_fused_path(x):
             fused = self._fused_swiglu
             assert fused is not None
             pre_w3 = fused
@@ -2627,35 +2631,36 @@ class PairUpdateBlock(nn.Module):
         self.pair_transition.set_chunk_size(chunk_size)
 
     def _can_use_fused_trimul_with_residual(self, pair: Tensor) -> bool:
-        return _fused_active(self, pair) and pair.dtype == torch.bfloat16
+        return (
+            _fused_pair_stack_active(self, pair)
+            and pair.dtype == _FUSED_KERNEL_DTYPE
+            and _fused_trimul_with_residual is not None
+        )
 
     def _fused_trimul_with_residual(
         self, pair: Tensor, direction: str, pair_attention_mask: Tensor | None
     ) -> Tensor:
         """Fused TriMul+residual call; weights from the corresponding engine."""
         tri = self.tri_mul_out if direction == "outgoing" else self.tri_mul_in
-        engine: TriangleMultiplicativeBlock = tri._engine  # type: ignore[assignment]
+        engine: TriangleMultiplicativeBlock = tri._engine
         p_in_weight, g_in_weight = engine.split_kernel_weights()
 
-        def _bf16(t: Tensor) -> Tensor:
-            return t if t.dtype == torch.bfloat16 else t.to(torch.bfloat16)
-
-        return _fused_trimul_with_residual(  # type: ignore[misc]
+        return _fused_trimul_with_residual(
             pair,
             direction,
             residual=pair,
             drop_mask=None,  # inference: no dropout, matches internal's eval path
-            norm_in_weight=_bf16(engine.norm_start.weight),
-            norm_in_bias=_bf16(engine.norm_start.bias),
-            p_in_weight=_bf16(p_in_weight),
-            g_in_weight=_bf16(g_in_weight),
-            norm_out_weight=_bf16(engine.norm_mix.weight),
-            norm_out_bias=_bf16(engine.norm_mix.bias),
-            p_out_weight=_bf16(engine.proj_emit.weight),
-            g_out_weight=_bf16(engine.proj_gate.weight),
+            norm_in_weight=_to_fused_kernel_dtype(engine.norm_start.weight),
+            norm_in_bias=_to_fused_kernel_dtype(engine.norm_start.bias),
+            p_in_weight=_to_fused_kernel_dtype(p_in_weight),
+            g_in_weight=_to_fused_kernel_dtype(g_in_weight),
+            norm_out_weight=_to_fused_kernel_dtype(engine.norm_mix.weight),
+            norm_out_bias=_to_fused_kernel_dtype(engine.norm_mix.bias),
+            p_out_weight=_to_fused_kernel_dtype(engine.proj_emit.weight),
+            g_out_weight=_to_fused_kernel_dtype(engine.proj_gate.weight),
             mask=pair_attention_mask,
             eps=_EPS,
-        )
+        )  # ty:ignore[call-non-callable]
 
     def forward(
         self, pair: Tensor, pair_attention_mask: Tensor | None = None
@@ -2711,7 +2716,7 @@ class FoldingTrunk(nn.Module):
         for block in self.blocks:
             fn = partial(block, pair_attention_mask=pair_attention_mask)
             if torch.is_grad_enabled():
-                pair = checkpoint(fn, pair, use_reentrant=False)  # pyright: ignore
+                pair = checkpoint(fn, pair, use_reentrant=False)
             else:
                 pair = fn(pair)
         if pair.dtype != orig_dtype:

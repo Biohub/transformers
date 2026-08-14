@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from ...modeling_utils import PreTrainedModel  # type: ignore[import]
+from ...modeling_utils import PreTrainedModel  # ty:ignore[unresolved-import]
 from .configuration_esmfold2 import ESMFold2Config
 from .modeling_esmfold2_common import (
     CHAR_VOCAB_SIZE,
@@ -306,17 +306,21 @@ class ConfidenceHead(nn.Module):
         pair_chains_iptm = torch.zeros(
             Bm, n_chains, n_chains, device=tm_expected.device, dtype=tm_expected.dtype
         )
+        # pair_chains_iptm[c1, c2] = max over rows i in chain c2 of the mean over
+        # columns j in chain c1 of tm_expected[i, j] (max-of-row-mean, as in the
+        # global iptm above), so iptm equals the max off-diagonal entry.
         for c1 in range(n_chains):
             chain_c1 = (expanded_asym == c1).float() * mask_f
             if chain_c1.sum() == 0:
                 continue
+            col_mask = chain_c1.unsqueeze(-2)
+            avg_tm = (tm_expected * col_mask).sum(dim=-1) / (
+                col_mask.sum(dim=-1) + _EPS
+            )
             for c2 in range(n_chains):
                 chain_c2 = (expanded_asym == c2).float() * mask_f
-                pair_m = chain_c1.unsqueeze(-1) * chain_c2.unsqueeze(-2)
-                denom = pair_m.sum(dim=(-1, -2)) + _EPS
-                pair_chains_iptm[:, c1, c2] = (tm_expected * pair_m).sum(
-                    dim=(-1, -2)
-                ) / denom
+                row_vals = avg_tm.masked_fill(chain_c2 == 0, float("-inf"))
+                pair_chains_iptm[:, c1, c2] = row_vals.max(dim=-1).values.clamp(min=0.0)
 
         return {
             "plddt_logits": plddt_logits,
@@ -542,7 +546,7 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         self.pair_loop_proj = nn.Sequential(
             nn.LayerNorm(d_pair), nn.Linear(d_pair, d_pair, bias=False)
         )
-        nn.init.zeros_(self.pair_loop_proj[1].weight)  # type: ignore[arg-type]
+        nn.init.zeros_(self.pair_loop_proj[1].weight)  # ty:ignore[invalid-argument-type]
 
         # Structure head
         self.structure_head = DiffusionStructureHead(config)
@@ -598,7 +602,7 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
 
     def load_esmc(self, esmc_model_path: str) -> None:
         """Load the ESMC LM backbone from a HuggingFace Hub repo ID or local directory."""
-        from ..esmc.modeling_esmc import ESMCModel  # type: ignore[import]
+        from ..esmc.modeling_esmc import ESMCModel
 
         esmc = ESMCModel.from_pretrained(esmc_model_path)
         self._esmc = esmc.bfloat16().to(self.device).eval()
@@ -636,7 +640,7 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
                 "All-atom inference requires the `esm` companion package: "
                 "`pip install esm`."
             ) from e
-        esmfold2 = esm.models.esmfold2  # type: ignore[attr-defined]
+        esmfold2 = esm.models.esmfold2
 
         if isinstance(structure_input, esmfold2.ProteinInput):
             structure_input = esmfold2.StructurePredictionInput(
@@ -656,7 +660,7 @@ class ESMFold2ExperimentalModel(PreTrainedModel):
         import evolutionaryscale.opensource as esm  # TODO: change to `import esm` when open sourcing
         import evolutionaryscale.opensource.models.esmfold2  # noqa: F401  # TODO: drop when open sourcing
 
-        esmfold2 = esm.models.esmfold2  # type: ignore[attr-defined]
+        esmfold2 = esm.models.esmfold2
 
         ELEMENT_NUMBER_TO_SYMBOL = esmfold2.ELEMENT_NUMBER_TO_SYMBOL
         MolecularComplex = esmfold2.MolecularComplex

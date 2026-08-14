@@ -170,7 +170,7 @@ class FoldingTrunkDistributed(nn.Module):
             raise TypeError(f"trunk must be FoldingTrunk, got {type(trunk).__name__}")
 
         self.blocks = nn.ModuleList(
-            [PairUpdateBlockDistributed(block, dist_manager) for block in trunk.blocks]  # type: ignore[arg-type]
+            [PairUpdateBlockDistributed(block, dist_manager) for block in trunk.blocks]  # ty:ignore[invalid-argument-type]
         )
 
     def forward(

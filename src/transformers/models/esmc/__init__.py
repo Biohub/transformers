@@ -13,8 +13,10 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
-from ...utils import _LazyModule  # type: ignore[import]
-from ...utils.import_utils import define_import_structure  # type: ignore[import]
+from ...utils import _LazyModule  # ty:ignore[unresolved-import]
+from ...utils.import_utils import (  # ty:ignore[unresolved-import]
+    define_import_structure,
+)
 
 if TYPE_CHECKING:
     from .configuration_esmc import *  # noqa: F403

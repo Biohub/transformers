@@ -23,14 +23,14 @@ import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn import functional as F
 
-from ...modeling_outputs import (  # type: ignore[import]
+from ...modeling_outputs import (  # ty:ignore[unresolved-import]
     MaskedLMOutput,
     ModelOutput,
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from ...modeling_utils import PreTrainedModel  # type: ignore[import]
-from ...utils import (  # type: ignore[import]
+from ...modeling_utils import PreTrainedModel  # ty:ignore[unresolved-import]
+from ...utils import (  # ty:ignore[unresolved-import]
     auto_docstring,
     can_return_tuple,
     is_flash_attn_2_available,
@@ -58,7 +58,7 @@ try:
 
     _flash_attn_rotary_available = torch.cuda.is_available()
 except ImportError:
-    apply_triton_rotary = None  # type: ignore[assignment]
+    apply_triton_rotary = None  # ty:ignore[invalid-assignment]
     _flash_attn_rotary_available = False
 
 # Transformer Engine: fused LayerNorm+Linear / LayerNorm+MLP kernels with
@@ -67,11 +67,11 @@ except ImportError:
 # ~O(100) in bf16 on the unnormalized residual stream (perplexity stays
 # within rounding noise).
 try:
-    import transformer_engine.pytorch as te  # type: ignore[import-untyped]
+    import transformer_engine.pytorch as te
 
     _te_available = True
 except ImportError:
-    te = None  # type: ignore[assignment]
+    te = None  # ty:ignore[invalid-assignment]
     _te_available = False
 
 # xformers: preferred SDPA implementation on GPU. Provides a fused
@@ -79,11 +79,11 @@ except ImportError:
 # Attention 2 and PyTorch's ``F.scaled_dot_product_attention`` are
 # progressively-less-preferred fallbacks.
 try:
-    import xformers.ops as xops  # type: ignore[import-untyped]
+    import xformers.ops as xops
 
     _xformers_available = True
 except ImportError:
-    xops = None  # type: ignore[assignment]
+    xops = None  # ty:ignore[invalid-assignment]
     _xformers_available = False
 
 # Flash Attention 2: secondary SDPA fallback. Used when xformers is not
@@ -91,7 +91,7 @@ except ImportError:
 if _flash_attn_available:
     from flash_attn import flash_attn_func
 else:
-    flash_attn_func = None  # type: ignore[assignment]
+    flash_attn_func = None
 
 if not _te_available:
     logger.warning(
@@ -359,21 +359,21 @@ class RotaryEmbedding(nn.Module):
                 )
             else:
                 t = (
-                    torch.arange(seqlen, device=device, dtype=self.inv_freq.dtype)  # type: ignore[call-overload]
+                    torch.arange(seqlen, device=device, dtype=self.inv_freq.dtype)  # ty:ignore[no-matching-overload]
                     / self.scaling_factor
                 )
                 inv_freq = self.inv_freq
-            freqs = torch.outer(t, inv_freq)  # type: ignore[arg-type]
+            freqs = torch.outer(t, inv_freq)  # ty:ignore[invalid-argument-type]
 
             if self.scale is None:
                 self._cos_cached = torch.cos(freqs).to(dtype)
                 self._sin_cached = torch.sin(freqs).to(dtype)
             else:
-                _scale: torch.Tensor = self.scale  # type: ignore[assignment]
+                _scale: torch.Tensor = self.scale  # ty:ignore[invalid-assignment]
                 power = (
                     torch.arange(seqlen, dtype=_scale.dtype, device=_scale.device)
                     - seqlen // 2
-                ) / self.scale_base  # type: ignore[operator]
+                ) / self.scale_base  # ty:ignore[unsupported-operator]
                 scale = _scale.to(device=power.device) ** power.unsqueeze(-1)
                 self._cos_cached = (torch.cos(freqs) * scale).to(dtype)
                 self._sin_cached = (torch.sin(freqs) * scale).to(dtype)
@@ -422,8 +422,8 @@ class RotaryEmbedding(nn.Module):
         sin = self._sin_cached[seqlen_offset:]
 
         if _flash_attn_rotary_available and q.device.type == "cuda":
-            q_rot = apply_triton_rotary(q, cos, sin, interleaved=self.interleaved)  # type: ignore[misc]
-            k_rot = apply_triton_rotary(k, cos, sin, interleaved=self.interleaved)  # type: ignore[misc]
+            q_rot = apply_triton_rotary(q, cos, sin, interleaved=self.interleaved)
+            k_rot = apply_triton_rotary(k, cos, sin, interleaved=self.interleaved)
         else:
             q_rot = _apply_rotary_emb_torch(q, cos, sin, self.interleaved)
             k_rot = _apply_rotary_emb_torch(k, cos, sin, self.interleaved)
@@ -440,7 +440,7 @@ class _TritonRotaryEmbedding(RotaryEmbedding):
 
     def forward(
         self, qkv: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
-    ) -> torch.Tensor:  # type: ignore[override]
+    ) -> torch.Tensor:
         """Apply RoPE in-place to a packed ``(N, 3, n_heads, head_dim)`` tensor."""
         self._update_cos_sin_cache(max_seqlen, device=qkv.device, dtype=qkv.dtype)
         assert self._cos_cached is not None and self._sin_cached is not None
@@ -547,7 +547,7 @@ def _swiglu_ln_ffn(d_model: int, expansion_ratio: float, bias: bool) -> nn.Modul
     assert not bias, "ESMC was trained with bias=False; bias=True not supported"
     hidden = _swiglu_hidden_dim(expansion_ratio, d_model)
     if _te_available:
-        return te.LayerNormMLP(  # type: ignore[union-attr]
+        return te.LayerNormMLP(
             hidden_size=d_model,
             ffn_hidden_size=hidden,
             bias=bias,
@@ -563,9 +563,7 @@ def _make_attn_layernorm_qkv(d_model: int, bias: bool) -> nn.Module:
     available; pure-PyTorch fallback otherwise."""
     assert not bias, "ESMC was trained with bias=False; bias=True not supported"
     if _te_available:
-        return te.LayerNormLinear(  # type: ignore[union-attr]
-            d_model, d_model * 3, bias=bias, init_method=None
-        )
+        return te.LayerNormLinear(d_model, d_model * 3, bias=bias, init_method=None)
     return _PyTorchLayerNormLinear(d_model, d_model * 3)
 
 
@@ -573,9 +571,7 @@ def _make_attn_out_proj(d_model: int, bias: bool) -> nn.Module:
     """Attention output projection. Uses Transformer Engine when available;
     pure-PyTorch ``nn.Linear`` otherwise."""
     if _te_available:
-        return te.Linear(  # type: ignore[union-attr]
-            d_model, d_model, bias=bias, init_method=None
-        )
+        return te.Linear(d_model, d_model, bias=bias, init_method=None)
     return nn.Linear(d_model, d_model, bias=bias)
 
 
@@ -630,7 +626,7 @@ def _scaled_dot_product_attention(
         q4 = q.view(b, s, n_heads, d_head)
         k4 = k.view(b, s, n_heads, d_head)
         v4 = v.view(b, s, n_heads, d_head)
-        context = xops.memory_efficient_attention(  # type: ignore[union-attr]
+        context = xops.memory_efficient_attention(
             q4, k4, v4, attn_bias=None, scale=d_head**-0.5
         )
         return context.reshape(b, s, n_heads * d_head)
@@ -643,10 +639,8 @@ def _scaled_dot_product_attention(
         q4 = q.view(b, s, n_heads, d_head)
         k4 = k.view(b, s, n_heads, d_head)
         v4 = v.view(b, s, n_heads, d_head)
-        context = flash_attn_func(  # type: ignore[misc]
-            q4, k4, v4, dropout_p=0.0, softmax_scale=d_head**-0.5
-        )
-        return context.reshape(b, s, n_heads * d_head)  # type: ignore[union-attr]
+        context = flash_attn_func(q4, k4, v4, dropout_p=0.0, softmax_scale=d_head**-0.5)  # ty:ignore[call-non-callable]
+        return context.reshape(b, s, n_heads * d_head)
     b, s, _ = q.shape
     q = q.view(b, s, n_heads, -1).transpose(1, 2)
     k = k.view(b, s, n_heads, -1).transpose(1, 2)
@@ -785,14 +779,11 @@ class _FlashMultiHeadAttention(MultiHeadAttention):
         qkv_packed = torch.stack([q, k, v], dim=1).view(T, 3, self.n_heads, self.d_head)
         qkv_packed = self.rotary(qkv_packed, cu_seqlens, max_seqlen)
 
-        context = flash_attn_varlen_qkvpacked_func(  # type: ignore[misc]
+        context = flash_attn_varlen_qkvpacked_func(
             qkv_packed, cu_seqlens, max_seqlen, softmax_scale=self.d_head**-0.5
-        )
-        n_out, h_out, d_out = context.shape  # type: ignore[union-attr]
-        return (
-            self.out_proj(context.reshape(n_out, h_out * d_out)),  # type: ignore[union-attr]
-            None,
-        )
+        )  # ty:ignore[call-non-callable]
+        n_out, h_out, d_out = context.shape
+        return (self.out_proj(context.reshape(n_out, h_out * d_out)), None)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,9 +1070,9 @@ class ESMCModel(ESMCPreTrainedModel):
         """Recover the backbone-layer index from a key written by
         :meth:`add_sae_models` (``"layer{N}"`` → ``N``)."""
         match = self._SAE_KEY_RE.fullmatch(model_name)
-        assert (
-            match is not None
-        ), f"Unexpected SAE key {model_name!r}; expected 'layer{{N}}'."
+        assert match is not None, (
+            f"Unexpected SAE key {model_name!r}; expected 'layer{{N}}'."
+        )
         return int(match.group(1))
 
     def _validate_sae_inputs(self, input_ids: torch.Tensor) -> None:
@@ -1215,7 +1206,7 @@ class ESMCModel(ESMCPreTrainedModel):
             bool_mask = sequence_id >= 0
         else:
             if attention_mask is None:
-                attention_mask = input_ids != self.config.pad_token_id
+                attention_mask = input_ids != self.config.pad_token_id  # ty:ignore[invalid-assignment]
             assert attention_mask is not None
             bool_mask = attention_mask.bool()
             sequence_id = bool_mask.to(torch.long) - 1
@@ -1260,7 +1251,7 @@ class ESMCModel(ESMCPreTrainedModel):
 
         # Stack once; reused for both SAE and hidden-state output.
         collected_tensor: torch.Tensor | None = (
-            torch.stack(collected, dim=0) if collected else None  # type: ignore[arg-type]
+            torch.stack(collected, dim=0) if collected else None
         )
 
         sae_outputs: dict[str, torch.Tensor] | None = None
@@ -1283,11 +1274,11 @@ class ESMCModel(ESMCPreTrainedModel):
                     attentions,
                 ]
                 if v is not None
-            )
+            )  # ty:ignore[invalid-return-type]
 
         return ESMCOutput(
             last_hidden_state=last_hidden_state,
-            hidden_states=hidden_states_tensor,
+            hidden_states=hidden_states_tensor,  # ty:ignore[invalid-argument-type]
             sae_outputs=sae_outputs,
             attentions=attentions,
         )
@@ -1332,7 +1323,7 @@ class ESMCForMaskedLM(ESMCPreTrainedModel):
         self.post_init()
 
     def get_output_embeddings(self) -> nn.Linear:
-        return self.lm_head[-1]  # type: ignore[return-value]
+        return self.lm_head[-1]
 
     def set_output_embeddings(self, new_embeddings: nn.Linear):
         self.lm_head[-1] = new_embeddings

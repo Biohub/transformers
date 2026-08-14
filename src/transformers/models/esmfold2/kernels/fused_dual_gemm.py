@@ -54,7 +54,7 @@ def _gated_dual_gemm_kernel(
     GROUP_M: tl.constexpr,
     HAS_MASK: tl.constexpr,
     TRANSPOSE_OUT: tl.constexpr,  # store (N, M) instead of (M, N)
-    NEEDS_INT64: tl.constexpr = True,  # type: ignore[assignment]
+    NEEDS_INT64: tl.constexpr = True,  # ty:ignore[invalid-parameter-default]
 ):
     """Per (TILE_M, TILE_N) output tile:
     gate_acc = Σ_K (x[:, k] @ w1[:, k]) over k
@@ -170,7 +170,7 @@ def _gated_dual_gemm_backward_kernel(
     HAS_MASK: tl.constexpr,
     GRAD_OUT_TRANSPOSED: tl.constexpr,  # 1: load grad from (N, M) layout
     GRAD_OUT_SPLIT: tl.constexpr,  # 1: read from two (N/2, M) tensors (chunk-free path)
-    NEEDS_INT64: tl.constexpr = True,  # type: ignore[assignment]
+    NEEDS_INT64: tl.constexpr = True,  # ty:ignore[invalid-parameter-default]
 ):
     """Per (TILE_M, TILE_N) output tile:
     gate_acc  = Σ_K x[:, k] @ w1[:, k]
@@ -303,9 +303,9 @@ def _fused_gated_dual_gemm_bwd(
     M = x_2d.shape[0]
     N = w1.shape[0]
 
-    assert (
-        w1.dtype == w2.dtype == torch.bfloat16
-    ), f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    assert w1.dtype == w2.dtype == torch.bfloat16, (
+        f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    )
     assert x_2d.dtype == torch.bfloat16, "bwd only supports bf16 x"
 
     if grad_out_split is not None:
@@ -425,7 +425,7 @@ class FusedGatedDualGEMM(torch.autograd.Function):
         return out
 
     @staticmethod
-    def backward(ctx, grad_out: torch.Tensor):  # type: ignore[override]
+    def backward(ctx, grad_out: torch.Tensor):
         if ctx.has_mask:
             x, w1, w2, mask = ctx.saved_tensors
         else:
@@ -478,7 +478,7 @@ class FusedGatedDualGEMMSplit(torch.autograd.Function):
         return a, b_t
 
     @staticmethod
-    def backward(ctx, grad_a: torch.Tensor, grad_b_t: torch.Tensor):  # type: ignore[override]
+    def backward(ctx, grad_a: torch.Tensor, grad_b_t: torch.Tensor):
         if ctx.has_mask:
             x, w1, w2, mask = ctx.saved_tensors
         else:
@@ -487,7 +487,7 @@ class FusedGatedDualGEMMSplit(torch.autograd.Function):
         # Don't call .contiguous() — _fused_gated_dual_gemm_bwd validates instead
         # (avoids a full-tensor copy on the common contig path).
         d_x, d_w1, d_w2, d_mask = _fused_gated_dual_gemm_bwd(
-            None,  # type: ignore[arg-type]
+            None,  # ty:ignore[invalid-argument-type]
             x,
             w1,
             w2,
@@ -514,7 +514,7 @@ def fused_gated_dual_gemm_split(
     if torch.is_grad_enabled() and (
         x.requires_grad or w1.requires_grad or w2.requires_grad
     ):
-        return FusedGatedDualGEMMSplit.apply(x, w1, w2, mask, trailing_shape)  # type: ignore[return-value]
+        return FusedGatedDualGEMMSplit.apply(x, w1, w2, mask, trailing_shape)
     out = _fused_gated_dual_gemm_fwd(x, w1, w2, mask=mask, transpose_out=True)
     N = w1.shape[0]
     out_view = out.view((N,) + trailing_shape)
@@ -548,9 +548,9 @@ def _fused_gated_dual_gemm_fwd(
 
     assert w1.shape == w2.shape, f"w1 {w1.shape} ≠ w2 {w2.shape}"
     assert w1.shape[1] == K
-    assert (
-        w1.dtype == w2.dtype == torch.bfloat16
-    ), f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    assert w1.dtype == w2.dtype == torch.bfloat16, (
+        f"weights must be bf16; got {w1.dtype}/{w2.dtype}"
+    )
 
     out_dtype = torch.bfloat16
     if transpose_out:
@@ -606,5 +606,5 @@ def fused_gated_dual_gemm(
             "transpose_out=True is inference-only; train path must use the "
             "non-transposed output (post-stage-3 einsum already handles layout)"
         )
-        return FusedGatedDualGEMM.apply(x, w1, w2, mask)  # type: ignore[return-value]
+        return FusedGatedDualGEMM.apply(x, w1, w2, mask)
     return _fused_gated_dual_gemm_fwd(x, w1, w2, mask=mask, transpose_out=transpose_out)

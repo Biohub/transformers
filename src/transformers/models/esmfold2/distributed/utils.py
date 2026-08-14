@@ -50,7 +50,7 @@ class LayoutMap:
     def __init__(
         self, strides: tuple[int, ...], shape: tuple[int, ...], offset: int = 0
     ):
-        if not all(isinstance(s, (int, np.int64)) and s > 0 for s in strides):  # type: ignore[arg-type]
+        if not all(isinstance(s, (int, np.int64)) and s > 0 for s in strides):
             raise ValueError(f"Strides must be positive integers: {strides}")
         if any(s < 0 for s in shape):
             raise ValueError(f"Shape must be non-negative: {shape}")
@@ -181,8 +181,8 @@ class LayoutMap:
         new_offset = self.offset
 
         for axis, s in enumerate(slices):
-            if isinstance(s, (int, np.int64)):  # type: ignore[arg-type]
-                new_offset += s * self.strides[axis]  # type: ignore[operator]
+            if isinstance(s, (int, np.int64)):
+                new_offset += s * self.strides[axis]
             elif isinstance(s, slice):
                 start, stop, step = s.indices(self.shape[axis])
                 if step <= 0:
@@ -231,7 +231,7 @@ def get_group_rank_from_axial_shift(
         raise ValueError(f"Axis {axis} out of range for coord {coord}")
     coord_shifted = list(coord)
     coord_shifted[axis] = (coord_shifted[axis] + delta) % layout_group.shape[axis]
-    return layout_group(coord_shifted)  # type: ignore[arg-type]
+    return layout_group(coord_shifted)  # ty:ignore[invalid-argument-type]
 
 
 def update_exhaustive_strides(
@@ -323,19 +323,22 @@ def tiled_softmax_attention_update(
     if is_initial_chunk:
         return o_chunk, lse_m_chunk, amax_chunk
 
+    assert o is not None and lse_m is not None
+
     if has_amax:
-        d_lse_m = lse_m - lse_m_chunk  # type: ignore[operator]
-        amax_next = torch.maximum(amax_chunk, amax)  # type: ignore[arg-type]
-        delta_lse = amax_chunk - amax - d_lse_m  # type: ignore[operator]
+        assert amax is not None
+        d_lse_m = lse_m - lse_m_chunk
+        amax_next = torch.maximum(amax_chunk, amax)
+        delta_lse = amax_chunk - amax - d_lse_m
         o_new = o - torch.sigmoid(delta_lse) * (o - o_chunk)
         lse_m_new = lse_m_chunk + torch.logsumexp(
-            torch.cat([(amax - amax_next) + d_lse_m, amax_chunk - amax_next], dim=-1),  # type: ignore[operator]
+            torch.cat([(amax - amax_next) + d_lse_m, amax_chunk - amax_next], dim=-1),
             dim=-1,
             keepdim=True,
         ).to(dtype=lse_m_chunk.dtype)
         return o_new, lse_m_new, amax_next
     else:
-        d_lse_m = lse_m - lse_m_chunk  # type: ignore[operator]
+        d_lse_m = lse_m - lse_m_chunk
         o_new = o - torch.sigmoid(-d_lse_m) * (o - o_chunk)
         lse_m_new = lse_m_chunk + torch.log1p(torch.exp(d_lse_m)).to(
             dtype=lse_m_chunk.dtype
@@ -405,8 +408,8 @@ class TrunkCPWrapper(nn.Module):
         # symbol is imported lazily inside the function to avoid a circular
         # import with pairformer.py); pyright can't narrow through the
         # lazy-import isinstance check.
-        serial_trunk.set_kernel_backend(None)  # type: ignore[operator]
-        serial_trunk.set_chunk_size(None)  # type: ignore[operator]
+        serial_trunk.set_kernel_backend(None)
+        serial_trunk.set_chunk_size(None)
 
         self.dist_trunk = FoldingTrunkDistributed(serial_trunk, dist_manager)
         self.dist_manager = dist_manager

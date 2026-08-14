@@ -276,8 +276,8 @@ def _lnlin_swiglu_fwd(
         Rstd.stride(0),
         K,
         1e-5,
-        BLOCK_SIZE=block,
-        num_warps=num_warps,  # pyright: ignore[reportCallIssue]
+        BLOCK_SIZE=block,  # ty:ignore[invalid-argument-type]
+        num_warps=num_warps,  # ty:ignore[unknown-argument]
     )
 
     cfg = _pick_fwd_config(K)
@@ -304,13 +304,13 @@ def _lnlin_swiglu_fwd(
         lin.stride(1),
         out.stride(0),
         out.stride(1),
-        HAS_LN_BIAS=(LN_B is not None),
+        HAS_LN_BIAS=(LN_B is not None),  # ty:ignore[invalid-argument-type]
         BLOCK_SIZE_M=cfg["BLOCK_SIZE_M"],
         BLOCK_SIZE_N=cfg["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=cfg["BLOCK_SIZE_K"],
         GROUP_SIZE_M=cfg["GROUP_SIZE_M"],
-        num_stages=cfg["num_stages"],  # pyright: ignore[reportCallIssue]
-        num_warps=cfg["num_warps"],  # pyright: ignore[reportCallIssue]
+        num_stages=cfg["num_stages"],  # ty:ignore[unknown-argument]
+        num_warps=cfg["num_warps"],  # ty:ignore[unknown-argument]
     )
     return out, lin, Mean, Rstd
 
@@ -328,8 +328,8 @@ def _swiglu_bwd_inplace(dout: torch.Tensor, lin: torch.Tensor) -> torch.Tensor:
         N,
         dout.stride(0),
         lin.stride(0),
-        BLOCK=BLOCK,
-        num_warps=4,  # pyright: ignore[reportCallIssue]
+        BLOCK=BLOCK,  # ty:ignore[invalid-argument-type]
+        num_warps=4,  # ty:ignore[unknown-argument]
     )
     return lin
 
@@ -410,6 +410,4 @@ class FusedLNLinearSwiGLU(nn.Module):
         nn.init.uniform_(self.W12, -bound, bound)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        return FusedLNLinearSwiGLUFunction.apply(  # type: ignore[return-value]
-            X, self.W12, self.LN_W, self.LN_B
-        )
+        return FusedLNLinearSwiGLUFunction.apply(X, self.W12, self.LN_W, self.LN_B)
