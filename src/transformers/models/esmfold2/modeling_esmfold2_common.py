@@ -48,6 +48,8 @@ except ImportError:
 
 # Vendored inference-only Triton kernels.
 try:
+    if not torch.cuda.is_available():
+        raise ImportError
     from .kernels import FusedDropoutResidual as _FusedDropoutResidual
     from .kernels import FusedLNLinearSwiGLU as _FusedLNLinearSwiGLU
     from .kernels import fused_pair_bias as _fused_pair_bias
