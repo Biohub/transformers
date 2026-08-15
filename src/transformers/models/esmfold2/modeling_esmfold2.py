@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+
 try:
     import transformer_engine.pytorch as te
     from transformer_engine.common.recipe import DelayedScaling, Format
@@ -55,6 +56,7 @@ from .modeling_esmfold2_common import (
     maybe_apply_msa_column_masking,
     maybe_subsample_msa,
 )
+
 
 _EPS = 1e-6
 _NONPOLYMER_ID = 4
@@ -877,6 +879,7 @@ class ESMFold2Model(PreTrainedModel):
         msa_max_depth: int = 1024,
         msa_column_mask_rate: float = 0.1,
         msa_subsample_at_inference: bool = True,
+        confidence_chunk_size: int | None = None,
         **kwargs,
     ) -> dict[str, Tensor]:
         tok_mask = token_attention_mask
@@ -995,15 +998,15 @@ class ESMFold2Model(PreTrainedModel):
                 msa_attention_mask = maybe_apply_msa_column_masking(
                     msa_attention_mask, rate=msa_column_mask_rate
                 )
-                _msa_inputs = dict(
-                    msa=msa,
-                    msa_attention_mask=msa_attention_mask,
-                    has_deletion=has_deletion,
-                    deletion_value=deletion_value,
-                    x_inputs=x_inputs,
-                    max_depth=msa_max_depth,
-                    subsample_enabled=msa_subsample_at_inference,
-                )
+                _msa_inputs = {
+                    "msa": msa,
+                    "msa_attention_mask": msa_attention_mask,
+                    "has_deletion": has_deletion,
+                    "deletion_value": deletion_value,
+                    "x_inputs": x_inputs,
+                    "max_depth": msa_max_depth,
+                    "subsample_enabled": msa_subsample_at_inference,
+                }
 
             # Method call (not inline loop) frees per-iter L²×c_z locals.
             z = self._run_one_loop(
@@ -1054,20 +1057,48 @@ class ESMFold2Model(PreTrainedModel):
         output: dict[str, Tensor] = {"distogram_logits": distogram_logits}
         output["sample_atom_coords"] = sample_coords
 
-        confidence_output = self.confidence_head(
-            s_inputs=x_inputs.detach(),
-            z=z.detach().float(),
-            x_pred=sample_coords.detach(),
-            distogram_atom_idx=disto_idx,
-            token_attention_mask=tok_mask,
-            atom_to_token=atom_to_token,
-            atom_attention_mask=atm_mask,
-            asym_id=asym_id,
-            mol_type=mol_type,
-            num_diffusion_samples=n_samples,
-            relative_position_encoding=relative_position_encoding.detach(),
-            token_bonds_encoding=token_bonds_encoding.detach(),
-        )
+        confidence_kwargs = {
+            "s_inputs": x_inputs.detach(),
+            "z": z.detach().float(),
+            "distogram_atom_idx": disto_idx,
+            "token_attention_mask": tok_mask,
+            "atom_to_token": atom_to_token,
+            "atom_attention_mask": atm_mask,
+            "asym_id": asym_id,
+            "mol_type": mol_type,
+            "relative_position_encoding": relative_position_encoding.detach(),
+            "token_bonds_encoding": token_bonds_encoding.detach(),
+        }
+        if confidence_chunk_size is None or confidence_chunk_size >= n_samples:
+            confidence_output = self.confidence_head(
+                **confidence_kwargs,
+                x_pred=sample_coords.detach(),
+                num_diffusion_samples=n_samples,
+            )
+        else:
+            if confidence_chunk_size < 1:
+                raise ValueError("confidence_chunk_size must be positive or None")
+            batch_size = x_inputs.shape[0]
+            sample_shape = sample_coords.shape[1:]
+            samples = sample_coords.reshape(batch_size, n_samples, *sample_shape)
+            confidence_chunks: dict[str, list[Tensor]] = {}
+            for start in range(0, n_samples, confidence_chunk_size):
+                stop = min(start + confidence_chunk_size, n_samples)
+                chunk_samples = samples[:, start:stop].reshape(-1, *sample_shape)
+                chunk_output = self.confidence_head(
+                    **confidence_kwargs,
+                    x_pred=chunk_samples.detach(),
+                    num_diffusion_samples=stop - start,
+                )
+                for name, value in chunk_output.items():
+                    value = value.reshape(batch_size, stop - start, *value.shape[1:])
+                    confidence_chunks.setdefault(name, []).append(value)
+            confidence_output = {
+                name: torch.cat(values, dim=1).reshape(
+                    batch_size * n_samples, *values[0].shape[2:]
+                )
+                for name, values in confidence_chunks.items()
+            }
         output.update(confidence_output)
         output["atom_pad_mask"] = (
             atm_mask.unsqueeze(0) if atm_mask.dim() == 1 else atm_mask
